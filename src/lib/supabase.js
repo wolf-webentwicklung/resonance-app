@@ -275,6 +275,17 @@ export async function proposeReset(pairId, userId) {
   return data;
 }
 
+export async function proposeReveal(pairId, userId) {
+  await supabase.from('pair_proposals')
+    .update({ status: 'declined' })
+    .eq('pair_id', pairId).eq('type', 'reveal').eq('status', 'pending');
+  const { data, error } = await supabase.from('pair_proposals').insert({
+    pair_id: pairId, proposed_by: userId, type: 'reveal', status: 'pending',
+  }).select().single();
+  if (error) throw error;
+  return data;
+}
+
 export async function respondToProposal(proposalId, accept) {
   const { error } = await supabase.from('pair_proposals')
     .update({ status: accept ? 'accepted' : 'declined', responded_at: new Date().toISOString() })

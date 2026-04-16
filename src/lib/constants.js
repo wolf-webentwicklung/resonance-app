@@ -12,21 +12,53 @@ export var TONES = {
 
 export var TONE_KEYS = Object.keys(TONES);
 export var SIGNALS = ["shimmer","pulse","drift","flicker","density","wave"];
-export var WHISPER_WORDS = ["here", "closer", "stay", "again", "you"];
-export var ECHO_MARKS = [
+
+// Large pools — 5 random items are picked each time the picker opens
+export var WHISPER_POOL = [
+  "here", "closer", "stay", "again", "you",
+  "always", "soon", "miss", "near", "yours",
+  "safe", "home", "warm", "still", "now",
+  "listen", "softly", "gentle", "tender", "waiting",
+  "tonight", "dream", "found", "hold", "breathe",
+];
+export var ECHO_POOL = [
   { g: "\u2661", n: "tenderness" },
   { g: "\u221E", n: "always" },
   { g: "\u263E", n: "tonight" },
   { g: "\u2740", n: "bloom" },
   { g: "\u2727", n: "light" },
+  { g: "\u2022", n: "moment" },
+  { g: "\u2042", n: "constellation" },
+  { g: "\u2726", n: "spark" },
+  { g: "\u223F", n: "wave" },
+  { g: "\u25CB", n: "whole" },
+  { g: "\u2020", n: "anchor" },
+  { g: "\u2605", n: "wish" },
+  { g: "\u2302", n: "home" },
+  { g: "\u2766", n: "devotion" },
+  { g: "\u2756", n: "precious" },
 ];
 export var GLIMPSE_TEXTS = [
   "a fragment of what you\u2019re building",
   "your shared canvas grows",
   "traces accumulate silently",
   "something is taking shape",
+  "look what you\u2019re creating",
+  "every trace leaves a mark",
 ];
 export var FONT = "'Outfit', sans-serif";
+
+// Pick n random unique items from an array
+export function pickN(arr, n) {
+  var copy = arr.slice();
+  var result = [];
+  for (var i = 0; i < Math.min(n, copy.length); i++) {
+    var idx = Math.floor(Math.random() * copy.length);
+    result.push(copy[idx]);
+    copy.splice(idx, 1);
+  }
+  return result;
+}
 
 // ── Cooldown constants ──
 // Minimum hours between resonance moments for the same pair

@@ -5,12 +5,15 @@ import {
   getArtwork, dissolvePair,
   subscribeToTraces, subscribeToEvents, subscribeToPair,
   getUnseenEvents, markEventSeen,
-  getActiveProposal, proposeReunion, proposeReset, respondToProposal, completeProposal, executeResetArtwork, subscribeToProposals
+  getActiveProposal, proposeReunion, proposeReset, proposeReveal, respondToProposal, completeProposal, executeResetArtwork, subscribeToProposals,
+  supabase
 } from './lib/supabase.js';
 import { detectMoment, persistMoment } from './lib/moments.js';
+import { hapticTap, hapticLight, hapticMedium, hapticReveal, hapticMoment, hapticSend, hapticProximity } from './lib/haptics.js';
+import { initAudio, soundFound, soundReveal, soundMoment, soundSend, soundIncoming, soundArtworkReveal } from './lib/audio.js';
 import {
-  TONES, TONE_KEYS, WHISPER_WORDS, ECHO_MARKS, GLIMPSE_TEXTS, FONT,
-  lerp, dst, clamp, pick, hex2, makeNoise, analyzeGesture, drawGesturePath
+  TONES, TONE_KEYS, WHISPER_POOL, ECHO_POOL, GLIMPSE_TEXTS, FONT,
+  lerp, dst, clamp, pick, pickN, hex2, makeNoise, analyzeGesture, drawGesturePath
 } from './lib/constants.js';
 
 // ══════════════════════════════════════
@@ -20,7 +23,7 @@ function Welcome({ onStart }) {
   var _a = useState(0), al = _a[0], sa = _a[1];
   useEffect(function() { setTimeout(function() { sa(1); }, 300); }, []);
   return (
-    <div style={{ position:"absolute",inset:0,zIndex:50,background:"#0A0A12",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",fontFamily:FONT,cursor:"pointer",opacity:al,transition:"opacity 1s ease" }} onClick={onStart}>
+    <div style={{ position:"absolute",inset:0,zIndex:50,background:"#0A0A12",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",fontFamily:FONT,cursor:"pointer",opacity:al,transition:"opacity 1s ease" }} onClick={function() { initAudio(); if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission(); onStart(); }}>
       <div style={{ marginBottom:60 }}>
         <div style={{ fontSize:24,fontWeight:200,letterSpacing:"0.5em",color:"rgba(255,255,255,0.2)",marginBottom:16,textAlign:"center" }}>RESONANCE</div>
         <div style={{ fontSize:12,fontWeight:200,letterSpacing:"0.15em",color:"rgba(255,255,255,0.12)",textAlign:"center",lineHeight:1.8 }}>
@@ -266,7 +269,11 @@ function ResonanceSpace({ user, pair, onDissolve }) {
 
   // ── Reunion (artwork reveal date) ──
   var _reu = useState(null), reunion = _reu[0], setReunion = _reu[1];
-  var _reuUI = useState(null), reunionUI = _reuUI[0], setReunionUI = _reuUI[1]; // "propose" | "incoming" | "reveal" | null
+  var _reuUI = useState(null), reunionUI = _reuUI[0], setReunionUI = _reuUI[1];
+
+  // ── Presence + day counter ──
+  var _pres = useState(false), partnerHere = _pres[0], setPartnerHere = _pres[1];
+  var dayCount = pair ? Math.max(1, Math.ceil((Date.now() - new Date(pair.created_at).getTime()) / 86400000)) : 0;
 
   var cvRef = useRef(null);
   var nf1 = useRef(makeNoise()), nf2 = useRef(makeNoise()), nf3 = useRef(makeNoise());
@@ -360,6 +367,8 @@ function ResonanceSpace({ user, pair, onDissolve }) {
       if (phR.current === "idle") {
         setTrace(newTrace);
         setPhase("discovery");
+        soundIncoming();
+        hapticMedium();
       }
     });
     return function() { sub.unsubscribe(); };
@@ -431,6 +440,19 @@ function ResonanceSpace({ user, pair, onDissolve }) {
           }
         }
       }
+      if (proposal.type === 'reveal') {
+        if (proposal.status === "pending" && proposal.proposed_by !== user.id) {
+          setReunion(proposal);
+          setReunionUI("incoming_reveal");
+        }
+        if (proposal.status === "accepted") {
+          setReunion(proposal);
+          setReunionUI("reveal");
+        }
+        if (proposal.status === "declined" || proposal.status === "completed") {
+          setReunionUI(null);
+        }
+      }
     });
     return function() { sub.unsubscribe(); };
   }, [pair, user]);
@@ -462,6 +484,33 @@ function ResonanceSpace({ user, pair, onDissolve }) {
     document.addEventListener("visibilitychange", onVisible);
     return function() { document.removeEventListener("visibilitychange", onVisible); };
   }, [user, pair, incomingMoment, handleIncomingEvent]);
+
+  // ── Presence: track self + detect partner ──
+  useEffect(function() {
+    if (!pair || !user) return;
+    var ch = supabase.channel('presence-' + pair.id, { config: { presence: { key: user.id } } });
+    ch.on('presence', { event: 'sync' }, function() {
+      var state = ch.presenceState();
+      var keys = Object.keys(state);
+      var partnerOnline = keys.some(function(k) { return k !== user.id; });
+      setPartnerHere(partnerOnline);
+    });
+    ch.subscribe(function(status) {
+      if (status === 'SUBSCRIBED') ch.track({ user_id: user.id, online_at: new Date().toISOString() });
+    });
+    return function() { supabase.removeChannel(ch); };
+  }, [pair, user]);
+
+  // ── Browser notification when trace arrives in background ──
+  useEffect(function() {
+    if (!user) return;
+    var sub = subscribeToTraces(user.id, function() {
+      if (document.visibilityState === 'hidden' && 'Notification' in window && Notification.permission === 'granted') {
+        try { new Notification('Resonance', { body: 'someone left something for you', icon: '/icon-192.png', tag: 'trace' }); } catch (e) {}
+      }
+    });
+    return function() { sub.unsubscribe(); };
+  }, [user]);
 
   // ── Passive reveal timer (with notice) ──
   useEffect(function() {
@@ -606,18 +655,20 @@ function ResonanceSpace({ user, pair, onDissolve }) {
   var REVEAL_MS = 1500;
   var startHold = useCallback(function() {
     if (holdRef.current) return; hpR.current = 0; setHoldProg(0);
+    soundFound(); hapticMedium();
     var s = Date.now();
     holdRef.current = setInterval(function() {
       var p2 = Math.min(1, (Date.now()-s)/REVEAL_MS); hpR.current = p2; setHoldProg(p2);
-      if (p2 >= 1) { clearInterval(holdRef.current); holdRef.current = null; setPhase("revealing"); }
+      if (p2 >= 1) { clearInterval(holdRef.current); holdRef.current = null; hapticReveal(); setPhase("revealing"); }
     }, 16);
   }, []);
   var stopHold = useCallback(function() { if (holdRef.current) { clearInterval(holdRef.current); holdRef.current = null; } hpR.current = 0; setHoldProg(0); }, []);
 
+  var lastProxZone = useRef(-1);
   var onDown = useCallback(function(ev) {
     if (phase !== "discovery" || !trace) return;
     var r = ev.currentTarget.getBoundingClientRect(), x = (ev.clientX-r.left)/r.width, y = (ev.clientY-r.top)/r.height;
-    setTouch({ x, y }); tcR.current = { x, y };
+    setTouch({ x, y }); tcR.current = { x, y }; hapticTap();
     if (dst(x, y, trace.reveal_position.x, trace.reveal_position.y) / Math.sqrt(2) < (trace.search_radius || 0.08)) startHold();
   }, [phase, trace, startHold]);
 
@@ -626,6 +677,10 @@ function ResonanceSpace({ user, pair, onDissolve }) {
     var r = ev.currentTarget.getBoundingClientRect(), x = (ev.clientX-r.left)/r.width, y = (ev.clientY-r.top)/r.height;
     setTouch({ x, y }); tcR.current = { x, y };
     var d = dst(x, y, trace.reveal_position.x, trace.reveal_position.y) / Math.sqrt(2);
+    // Proximity feedback — trigger on zone changes, not every frame
+    var zone = d < 0.08 ? 4 : d < 0.15 ? 3 : d < 0.30 ? 2 : d < 0.50 ? 1 : 0;
+    if (zone > 0 && zone !== lastProxZone.current) { hapticProximity(zone / 4); }
+    lastProxZone.current = zone;
     if (d < (trace.search_radius || 0.08)) { if (!holdRef.current) startHold(); } else stopHold();
   }, [phase, trace, startHold, stopHold]);
 
@@ -636,6 +691,7 @@ function ResonanceSpace({ user, pair, onDissolve }) {
 
   // ── Reveal done → detect moment (singular!) → or go to glimpse ──
   var onRevealDone = useCallback(async function() {
+    soundReveal();
     var tr = revealTraceR.current;
     if (!tr) { setPhase("idle"); var cs = await canSendTrace(user.id); setCanSend(cs); return; }
 
@@ -686,29 +742,28 @@ function ResonanceSpace({ user, pair, onDissolve }) {
   }, [currentMoment, pair, user]);
 
   // ── Moment transitions ──
-  var onIntroTwinDone = useCallback(function() { setMPhase("whisper"); }, []);
-  var onIntroAmpDone = useCallback(function() { setMPhase("pulse"); }, []);
-  var onIntroConvDone = useCallback(function() { setMPhase("echo"); }, []);
+  var onIntroTwinDone = useCallback(function() { soundMoment(); hapticMoment(); setMPhase("whisper"); }, []);
+  var onIntroAmpDone = useCallback(function() { soundMoment(); hapticMoment(); setMPhase("pulse"); }, []);
+  var onIntroConvDone = useCallback(function() { soundMoment(); hapticMoment(); setMPhase("echo"); }, []);
 
-  // Whisper: persist the chosen word so partner receives it
   var onWhisperSelect = useCallback(function(w) {
+    hapticLight();
     setMPhase("whisperShow"); setWhisper(w);
     finishMoment({ whisper_word: w });
   }, [finishMoment]);
   var onWhisperTimeout = useCallback(function() { finishMoment(null); }, [finishMoment]);
   var onWhisperDone = useCallback(function() { setWhisper(null); }, []);
 
-  // Echo mark: persist the chosen mark
   var onEchoSelect = useCallback(function(m) {
+    hapticLight();
     setMPhase("echoShow"); setEchoM(m);
     finishMoment({ echo_mark: m.g, echo_name: m.n });
   }, [finishMoment]);
   var onEchoTimeout = useCallback(function() { finishMoment(null); }, [finishMoment]);
   var onEchoDone = useCallback(function() { setEchoM(null); }, []);
 
-  // Pulse capture: persist the gesture
   var onPulseCapture = useCallback(function(p2) {
-    if (p2) setPendPulse(p2);
+    if (p2) { setPendPulse(p2); hapticSend(); }
     finishMoment(p2 ? { pulse_path: p2 } : null);
   }, [finishMoment]);
 
@@ -724,6 +779,7 @@ function ResonanceSpace({ user, pair, onDissolve }) {
   // ── Send trace ──
   var onSendTrace = useCallback(async function(data) {
     setPhase("idle"); setCanSend(false); setSentTone(data.tone);
+    soundSend(); hapticSend();
     if (onbStepR.current < 4) setOnbStep(4);
     try {
       await sendTrace(pair.id, user.id, partnerId, data.path, data.tone);
@@ -739,6 +795,35 @@ function ResonanceSpace({ user, pair, onDissolve }) {
 
   // ── Dismiss incoming partner moment ──
   var dismissIncoming = useCallback(function() { setIncomingMoment(null); }, []);
+
+  // ── Export artwork as image ──
+  var exportArtwork = useCallback(function() {
+    if (contribs.length === 0) return;
+    var c = document.createElement("canvas");
+    var size = 1080; c.width = size; c.height = size;
+    var ctx = c.getContext("2d");
+    ctx.fillStyle = "#0A0A12"; ctx.fillRect(0, 0, size, size);
+    contribs.forEach(function(ct) {
+      if (!ct.path || ct.path.length < 2) return;
+      drawGesturePath(ctx, ct.path, ct.tone, size, size, 0.7, 10);
+    });
+    // Add subtle text
+    ctx.fillStyle = "rgba(255,255,255,0.08)"; ctx.font = "200 14px 'Outfit', sans-serif";
+    ctx.textAlign = "center"; ctx.fillText("resonance", size / 2, size - 30);
+    try {
+      var link = document.createElement("a");
+      link.download = "resonance-artwork.png";
+      link.href = c.toDataURL("image/png");
+      link.click();
+    } catch (e) {
+      // Fallback: try share API
+      c.toBlob(function(blob) {
+        if (navigator.share && blob) {
+          navigator.share({ files: [new File([blob], "resonance-artwork.png", { type: "image/png" })] }).catch(function() {});
+        }
+      });
+    }
+  }, [contribs]);
 
   // ── Derived values ──
   var dNorm = 1, trRgb = "255,255,255";
@@ -771,38 +856,74 @@ function ResonanceSpace({ user, pair, onDissolve }) {
       <InstallPrompt />
 
       {/* Settings gear */}
-      {phase === "idle" ? <div onClick={function() { setShowSettings(true); }} style={{ position:"absolute",top:18,right:18,zIndex:11,cursor:"pointer",opacity:0.15,fontSize:18,color:"white" }}>{"\u2699"}</div> : null}
+      {phase === "idle" ? <div style={{ position:"absolute",top:18,left:0,right:0,zIndex:11,display:"flex",justifyContent:"space-between",alignItems:"center",padding:"0 18px",pointerEvents:"none" }}>
+        <div style={{ display:"flex",alignItems:"center",gap:8,pointerEvents:"none" }}>
+          {partnerHere ? <div style={{ display:"flex",alignItems:"center",gap:5 }}>
+            <div style={{ width:4,height:4,borderRadius:"50%",background:"rgba(212,165,116,0.6)",animation:"gentlePulse 3s ease infinite" }} />
+            <span style={{ color:"rgba(212,165,116,0.3)",fontSize:8,letterSpacing:"0.12em",fontWeight:200 }}>here</span>
+          </div> : null}
+          {dayCount > 1 && !partnerHere ? <span style={{ color:"rgba(255,255,255,0.08)",fontSize:8,letterSpacing:"0.1em",fontWeight:200 }}>day {dayCount}</span> : null}
+        </div>
+        <div onClick={function() { setShowSettings(true); }} style={{ cursor:"pointer",opacity:0.25,fontSize:18,color:"white",pointerEvents:"auto" }}>{"\u2699"}</div>
+      </div> : null}
       {showSettings ? <div style={{ position:"absolute",inset:0,zIndex:48,display:"flex",alignItems:"flex-end",justifyContent:"center" }} onClick={function() { setShowSettings(false); }}>
         <div style={{ position:"absolute",inset:0,background:"rgba(0,0,0,0.5)" }} />
         <div onClick={function(ev) { ev.stopPropagation(); }} style={{ position:"relative",width:"100%",maxWidth:400,background:"#111118",borderRadius:"20px 20px 0 0",padding:"28px 24px 40px",fontFamily:FONT }}>
           <div style={{ width:32,height:3,borderRadius:2,background:"rgba(255,255,255,0.15)",margin:"0 auto 24px" }} />
-          <div style={{ color:"rgba(255,255,255,0.2)",fontSize:9,letterSpacing:"0.25em",fontWeight:200,marginBottom:20 }}>SETTINGS</div>
-          <div style={{ color:"rgba(255,255,255,0.12)",fontSize:9,letterSpacing:"0.08em",fontWeight:200,marginBottom:16 }}>Connected as a pair</div>
+          <div style={{ color:"rgba(255,255,255,0.4)",fontSize:9,letterSpacing:"0.25em",fontWeight:200,marginBottom:20 }}>SETTINGS</div>
+          <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16 }}>
+            <div style={{ color:"rgba(255,255,255,0.25)",fontSize:10,letterSpacing:"0.08em",fontWeight:200 }}>
+              Connected{dayCount > 1 ? " \u00B7 day " + dayCount : ""}
+            </div>
+            {partnerHere ? <div style={{ display:"flex",alignItems:"center",gap:6 }}>
+              <div style={{ width:5,height:5,borderRadius:"50%",background:"rgba(212,165,116,0.6)" }} />
+              <span style={{ color:"rgba(212,165,116,0.5)",fontSize:9,fontWeight:200 }}>here now</span>
+            </div> : null}
+          </div>
 
           {/* Reunion */}
-          <div style={{ padding:"16px 0",borderTop:"1px solid rgba(255,255,255,0.05)" }}>
-            {reunion && reunion.status === "accepted" ? (
-              <div style={{ color:"rgba(212,165,116,0.5)",fontSize:11,fontWeight:200,letterSpacing:"0.1em" }}>
+          <div style={{ padding:"16px 0",borderTop:"1px solid rgba(255,255,255,0.06)" }}>
+            {reunion && reunion.type === "reunion" && reunion.status === "accepted" ? (
+              <div style={{ color:"rgba(212,165,116,0.7)",fontSize:11,fontWeight:300,letterSpacing:"0.1em" }}>
                 Reunion: {new Date(reunion.proposed_date + "T00:00:00").toLocaleDateString(undefined, { day:"numeric",month:"long" })}
               </div>
-            ) : reunion && reunion.status === "pending" && reunion.proposed_by === user.id ? (
-              <div style={{ color:"rgba(255,255,255,0.2)",fontSize:11,fontWeight:200,letterSpacing:"0.1em" }}>
+            ) : reunion && reunion.type === "reunion" && reunion.status === "pending" && reunion.proposed_by === user.id ? (
+              <div style={{ color:"rgba(255,255,255,0.35)",fontSize:11,fontWeight:200,letterSpacing:"0.1em" }}>
                 Waiting for your person to accept{"\u2026"}
               </div>
             ) : (
-              <div onClick={function() { setShowSettings(false); setReunionUI("propose"); }} style={{ color:"rgba(212,165,116,0.5)",fontSize:11,fontWeight:200,letterSpacing:"0.1em",cursor:"pointer" }}>
+              <div onClick={function() { setShowSettings(false); setReunionUI("propose"); }} style={{ color:"rgba(212,165,116,0.7)",fontSize:11,fontWeight:300,letterSpacing:"0.1em",cursor:"pointer" }}>
                 Plan a Reunion
               </div>
             )}
           </div>
 
-          {/* Dissolve */}
-          {contribs.length > 0 ? <div style={{ padding:"16px 0",borderTop:"1px solid rgba(255,255,255,0.05)" }}>
-            <div onClick={function() { setShowSettings(false); proposeReset(pair.id, user.id).catch(function(e) { console.error(e); }); }} style={{ color:"rgba(255,255,255,0.25)",fontSize:11,fontWeight:200,letterSpacing:"0.1em",cursor:"pointer" }}>Start Fresh</div>
-            <div style={{ color:"rgba(255,255,255,0.08)",fontSize:9,fontWeight:200,marginTop:6 }}>both need to agree · artwork will be cleared</div>
+          {/* Reveal Artwork */}
+          {contribs.length > 0 ? <div style={{ padding:"16px 0",borderTop:"1px solid rgba(255,255,255,0.06)" }}>
+            <div onClick={function() { setShowSettings(false); setReunionUI("confirm_reveal"); }} style={{ color:"rgba(212,165,116,0.7)",fontSize:11,fontWeight:300,letterSpacing:"0.1em",cursor:"pointer" }}>
+              Reveal Artwork
+            </div>
+            <div style={{ color:"rgba(255,255,255,0.2)",fontSize:9,fontWeight:200,marginTop:6 }}>see what you created together</div>
           </div> : null}
-          <div style={{ padding:"16px 0",borderTop:"1px solid rgba(255,255,255,0.05)" }}>
-            <div onClick={function() { if (confirm("Dissolve this connection? This cannot be undone.")) { setShowSettings(false); onDissolve(); } }} style={{ color:"rgba(196,30,58,0.5)",fontSize:11,fontWeight:200,letterSpacing:"0.1em",cursor:"pointer" }}>Dissolve Connection</div>
+
+          {/* Start Fresh */}
+          {contribs.length > 0 ? <div style={{ padding:"16px 0",borderTop:"1px solid rgba(255,255,255,0.06)" }}>
+            <div onClick={function() { setShowSettings(false); setReunionUI("confirm_reset"); }} style={{ color:"rgba(255,255,255,0.45)",fontSize:11,fontWeight:200,letterSpacing:"0.1em",cursor:"pointer" }}>
+              Start Fresh
+            </div>
+            <div style={{ color:"rgba(255,255,255,0.2)",fontSize:9,fontWeight:200,marginTop:6 }}>both need to agree · artwork will be cleared</div>
+          </div> : null}
+
+          {/* Export Artwork */}
+          {contribs.length > 0 ? <div style={{ padding:"16px 0",borderTop:"1px solid rgba(255,255,255,0.06)" }}>
+            <div onClick={function() { setShowSettings(false); exportArtwork(); }} style={{ color:"rgba(255,255,255,0.45)",fontSize:11,fontWeight:200,letterSpacing:"0.1em",cursor:"pointer" }}>
+              Save Artwork as Image
+            </div>
+          </div> : null}
+
+          {/* Dissolve */}
+          <div style={{ padding:"16px 0",borderTop:"1px solid rgba(255,255,255,0.06)" }}>
+            <div onClick={function() { if (confirm("Dissolve this connection? This cannot be undone.")) { setShowSettings(false); onDissolve(); } }} style={{ color:"rgba(196,30,58,0.6)",fontSize:11,fontWeight:200,letterSpacing:"0.1em",cursor:"pointer" }}>Dissolve Connection</div>
           </div>
         </div>
       </div> : null}
@@ -863,7 +984,27 @@ function ResonanceSpace({ user, pair, onDissolve }) {
 
       {/* Proposal overlays */}
       {reunionUI === "propose" ? <ReunionPropose pair={pair} user={user} onDone={function(reu) { if (reu) setReunion(reu); setReunionUI(null); }} /> : null}
+
+      {/* Confirm: Reveal Artwork */}
+      {reunionUI === "confirm_reveal" ? <ConfirmOverlay
+        title="REVEAL ARTWORK" text={"see everything you\u2019ve created together\nyour person will need to agree too"}
+        confirmLabel="SEND REQUEST" confirmColor="212,165,116"
+        onConfirm={function() { proposeReveal(pair.id, user.id).then(function() { setReunionUI(null); }).catch(function(e) { console.error(e); setReunionUI(null); }); }}
+        onCancel={function() { setReunionUI(null); }}
+      /> : null}
+
+      {/* Confirm: Start Fresh */}
+      {reunionUI === "confirm_reset" ? <ConfirmOverlay
+        title="START FRESH" text={"all traces and artwork will be cleared\nyou can build something new together\nyour person will need to agree too"}
+        confirmLabel="SEND REQUEST" confirmColor="255,255,255"
+        onConfirm={function() { proposeReset(pair.id, user.id).then(function() { setReunionUI(null); }).catch(function(e) { console.error(e); setReunionUI(null); }); }}
+        onCancel={function() { setReunionUI(null); }}
+      /> : null}
+
+      {/* Incoming: Reunion */}
       {reunionUI === "incoming_reunion" && reunion ? <ReunionIncoming reunion={reunion} onRespond={function(accept) { respondToProposal(reunion.id, accept).then(function() { setReunionUI(null); if (accept) setReunion(Object.assign({}, reunion, { status: "accepted" })); }); }} /> : null}
+
+      {/* Incoming: Reset */}
       {reunionUI === "incoming_reset" && reunion ? <ResetIncoming onRespond={function(accept) {
         respondToProposal(reunion.id, accept).then(function() {
           if (accept) {
@@ -874,10 +1015,22 @@ function ResonanceSpace({ user, pair, onDissolve }) {
           } else { setReunionUI(null); }
         });
       }} /> : null}
-      {reunionUI === "reveal" && reunion ? <ReunionReveal contribs={contribs} reunion={reunion} onDone={function() {
-        completeProposal(reunion.id).catch(function(){});
+
+      {/* Incoming: Reveal */}
+      {reunionUI === "incoming_reveal" && reunion ? <ConfirmOverlay
+        title="REVEAL ARTWORK" text={"your person wants to see\nwhat you\u2019ve created together"}
+        confirmLabel="REVEAL" confirmColor="212,165,116" cancelLabel="NOT YET"
+        onConfirm={function() { respondToProposal(reunion.id, true).then(function() { setReunion(Object.assign({}, reunion, { status: "accepted" })); setReunionUI("reveal"); }); }}
+        onCancel={function() { respondToProposal(reunion.id, false).then(function() { setReunionUI(null); }); }}
+      /> : null}
+
+      {/* Artwork Reveal */}
+      {reunionUI === "reveal" ? <ReunionReveal contribs={contribs} reunion={reunion} onDone={function() {
+        if (reunion) completeProposal(reunion.id).catch(function(){});
         setReunionUI("post_reveal");
       }} /> : null}
+
+      {/* Post-Reveal: Start fresh option */}
       {reunionUI === "post_reveal" ? <PostRevealPrompt onStartFresh={function() {
         proposeReset(pair.id, user.id).then(function() { setReunionUI(null); }).catch(function(e) { console.error(e); setReunionUI(null); });
       }} onKeep={function() { setReunion(null); setReunionUI(null); }} /> : null}
@@ -946,42 +1099,81 @@ function IncomingMomentDisplay({ event, pair, onDismiss }) {
 // ══════════════════════════════════════
 function InstallPrompt() {
   var _s = useState(false), show = _s[0], setShow = _s[1];
-  var _dismissed = useState(false), dismissed = _dismissed[0], setDismissed = _dismissed[1];
+  var _dip = useState(null), deferredPrompt = _dip[0], setDeferredPrompt = _dip[1];
 
   useEffect(function() {
-    // Don't show if already in standalone mode or dismissed before
     var isStandalone = window.matchMedia("(display-mode: standalone)").matches
       || window.navigator.standalone === true;
     if (isStandalone) return;
-
-    // Check if user dismissed recently (use sessionStorage so it comes back next session)
     try { if (sessionStorage.getItem("resonance_install_dismissed")) return; } catch(e) {}
 
-    // Show after 10 seconds
-    var t = setTimeout(function() { setShow(true); }, 10000);
-    return function() { clearTimeout(t); };
+    // Android: capture native install prompt
+    var handler = function(e) { e.preventDefault(); setDeferredPrompt(e); };
+    window.addEventListener("beforeinstallprompt", handler);
+
+    var t = setTimeout(function() { setShow(true); }, 8000);
+    return function() { clearTimeout(t); window.removeEventListener("beforeinstallprompt", handler); };
   }, []);
 
   var dismiss = useCallback(function() {
-    setDismissed(true);
     setShow(false);
     try { sessionStorage.setItem("resonance_install_dismissed", "1"); } catch(e) {}
   }, []);
 
-  if (!show || dismissed) return null;
+  var install = useCallback(function() {
+    if (deferredPrompt) {
+      deferredPrompt.prompt();
+      deferredPrompt.userChoice.then(function() { setShow(false); });
+    }
+  }, [deferredPrompt]);
+
+  if (!show) return null;
 
   var isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent);
-  var hint = isIOS
-    ? "Tap \u{FF0B} then \u201CAdd to Home Screen\u201D"
-    : "Tap \u22EE then \u201CAdd to Home Screen\u201D";
+  var canNativeInstall = !!deferredPrompt;
 
-  return <div style={{ position:"absolute",bottom:16,left:16,right:16,zIndex:55,fontFamily:FONT,animation:"fadeIn 1s ease" }}>
-    <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",padding:"14px 18px",borderRadius:16,background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.06)",backdropFilter:"blur(10px)",WebkitBackdropFilter:"blur(10px)" }}>
-      <div>
-        <div style={{ color:"rgba(255,255,255,0.35)",fontSize:10,letterSpacing:"0.1em",fontWeight:300,marginBottom:4 }}>Install Resonance</div>
-        <div style={{ color:"rgba(255,255,255,0.18)",fontSize:9,fontWeight:200 }}>{hint}</div>
-      </div>
-      <div onClick={dismiss} style={{ color:"rgba(255,255,255,0.2)",fontSize:16,cursor:"pointer",padding:"4px 8px" }}>{"\u2715"}</div>
+  return <div style={{ position:"absolute",inset:0,zIndex:56,display:"flex",alignItems:"center",justifyContent:"center",pointerEvents:"none" }}>
+    <div style={{ pointerEvents:"auto",maxWidth:300,padding:"24px 28px",borderRadius:20,background:"rgba(17,17,24,0.95)",border:"1px solid rgba(255,255,255,0.08)",fontFamily:FONT,textAlign:"center",animation:"fadeIn 0.8s ease",backdropFilter:"blur(12px)",WebkitBackdropFilter:"blur(12px)" }}>
+      <div style={{ color:"rgba(255,255,255,0.45)",fontSize:11,letterSpacing:"0.15em",fontWeight:300,marginBottom:10 }}>Install Resonance</div>
+      {canNativeInstall ? (
+        <div>
+          <div style={{ color:"rgba(255,255,255,0.25)",fontSize:10,fontWeight:200,marginBottom:18 }}>add to your home screen for the best experience</div>
+          <div style={{ display:"flex",gap:12,justifyContent:"center" }}>
+            <div onClick={dismiss} style={{ padding:"10px 20px",borderRadius:20,border:"1px solid rgba(255,255,255,0.06)",cursor:"pointer",color:"rgba(255,255,255,0.25)",fontSize:10,fontWeight:200 }}>Later</div>
+            <div onClick={install} style={{ padding:"10px 20px",borderRadius:20,border:"1px solid rgba(212,165,116,0.2)",background:"rgba(212,165,116,0.06)",cursor:"pointer",color:"rgba(212,165,116,0.7)",fontSize:10,fontWeight:300 }}>Install</div>
+          </div>
+        </div>
+      ) : isIOS ? (
+        <div>
+          <div style={{ color:"rgba(255,255,255,0.25)",fontSize:10,fontWeight:200,lineHeight:1.8,marginBottom:16 }}>
+            tap <span style={{ fontSize:16,verticalAlign:"middle" }}>{"\u2191"}</span> at the bottom of Safari{"\n"}then choose <em>Add to Home Screen</em>
+          </div>
+          <div onClick={dismiss} style={{ padding:"10px 20px",borderRadius:20,border:"1px solid rgba(255,255,255,0.06)",cursor:"pointer",color:"rgba(255,255,255,0.3)",fontSize:10,fontWeight:200,display:"inline-block" }}>Got it</div>
+        </div>
+      ) : (
+        <div>
+          <div style={{ color:"rgba(255,255,255,0.25)",fontSize:10,fontWeight:200,marginBottom:16 }}>add to your home screen for the best experience</div>
+          <div onClick={dismiss} style={{ padding:"10px 20px",borderRadius:20,border:"1px solid rgba(255,255,255,0.06)",cursor:"pointer",color:"rgba(255,255,255,0.3)",fontSize:10,fontWeight:200,display:"inline-block" }}>Got it</div>
+        </div>
+      )}
+    </div>
+  </div>;
+}
+
+
+// ══════════════════════════════════════
+// CONFIRM OVERLAY — reusable confirmation dialog
+// ══════════════════════════════════════
+function ConfirmOverlay({ title, text, confirmLabel, cancelLabel, confirmColor, onConfirm, onCancel }) {
+  var cc = confirmColor || "255,255,255";
+  var cl = cancelLabel || "CANCEL";
+  return <div style={{ position:"absolute",inset:0,zIndex:50,background:"rgba(6,6,12,0.97)",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",fontFamily:FONT,animation:"fadeIn 0.6s ease" }}>
+    <div style={{ width:2,height:2,borderRadius:"50%",background:"rgba("+cc+",0.4)",marginBottom:30 }} />
+    <div style={{ color:"rgba(255,255,255,0.35)",fontSize:9,letterSpacing:"0.3em",fontWeight:200,marginBottom:14 }}>{title}</div>
+    <div style={{ color:"rgba(255,255,255,0.25)",fontSize:11,fontWeight:200,letterSpacing:"0.06em",lineHeight:1.9,textAlign:"center",whiteSpace:"pre-line",marginBottom:40 }}>{text}</div>
+    <div style={{ display:"flex",gap:16 }}>
+      <div onClick={onCancel} style={{ padding:"14px 28px",borderRadius:24,border:"1px solid rgba(255,255,255,0.06)",cursor:"pointer",color:"rgba(255,255,255,0.3)",fontSize:11,letterSpacing:"0.15em",fontWeight:200 }}>{cl}</div>
+      <div onClick={onConfirm} style={{ padding:"14px 28px",borderRadius:24,border:"1px solid rgba("+cc+",0.2)",background:"rgba("+cc+",0.05)",cursor:"pointer",color:"rgba("+cc+",0.7)",fontSize:11,letterSpacing:"0.15em",fontWeight:300 }}>{confirmLabel}</div>
     </div>
   </div>;
 }
@@ -999,12 +1191,13 @@ function MomentIntro({ rgb, label, onDone }) {
 
 function WhisperPickerUI({ rgb, onSelect, onTimeout }) {
   var _t = useState(15), tm = _t[0], st = _t[1];
+  var words = useRef(pickN(WHISPER_POOL, 5));
   useEffect(function() { var iv = setInterval(function() { st(function(t) { if (t <= 1) { onTimeout(); return 0; } return t-1; }); }, 1000); return function() { clearInterval(iv); }; }, [onTimeout]);
   return <div style={{ position:"absolute",inset:0,zIndex:45,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",background:"rgba(6,6,12,0.93)",fontFamily:FONT,animation:"fadeIn 0.8s ease" }}>
     <div style={{ color:"rgba(255,255,255,0.22)",fontSize:9,letterSpacing:"0.3em",fontWeight:200,marginBottom:8 }}>TWIN CONNECTION</div>
     <div style={{ color:"rgba("+rgb+",0.6)",fontSize:12,letterSpacing:"0.2em",fontWeight:300,marginBottom:44 }}>choose a whisper for your person</div>
     <div style={{ display:"flex",flexDirection:"column",gap:16,alignItems:"center" }}>
-      {WHISPER_WORDS.map(function(w) { return <div key={w} onClick={function() { onSelect(w); }} style={{ padding:"14px 44px",cursor:"pointer",borderRadius:24,border:"1px solid rgba("+rgb+",0.15)",background:"rgba("+rgb+",0.04)",fontSize:17,fontWeight:200,letterSpacing:"0.25em",color:"rgba("+rgb+",0.6)",transition:"all 0.3s" }}>{w}</div>; })}
+      {words.current.map(function(w) { return <div key={w} onClick={function() { onSelect(w); }} style={{ padding:"14px 44px",cursor:"pointer",borderRadius:24,border:"1px solid rgba("+rgb+",0.15)",background:"rgba("+rgb+",0.04)",fontSize:17,fontWeight:200,letterSpacing:"0.25em",color:"rgba("+rgb+",0.6)",transition:"all 0.3s" }}>{w}</div>; })}
     </div>
     <div style={{ marginTop:32,color:"rgba(255,255,255,0.15)",fontSize:9,fontWeight:200 }}>{tm}s</div>
   </div>;
@@ -1021,11 +1214,12 @@ function WhisperDisplayUI({ word, rgb, onDone }) {
 
 function EchoMarkPickerUI({ rgb, onSelect, onTimeout }) {
   var _t = useState(15), tm = _t[0], st = _t[1];
+  var marks = useRef(pickN(ECHO_POOL, 5));
   useEffect(function() { var iv = setInterval(function() { st(function(t) { if (t <= 1) { onTimeout(); return 0; } return t-1; }); }, 1000); return function() { clearInterval(iv); }; }, [onTimeout]);
   return <div style={{ position:"absolute",inset:0,zIndex:45,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",background:"rgba(6,6,12,0.93)",fontFamily:FONT,animation:"fadeIn 0.8s ease" }}>
     <div style={{ color:"rgba(255,255,255,0.22)",fontSize:9,letterSpacing:"0.3em",fontWeight:200,marginBottom:8 }}>TRACES CONVERGED</div>
     <div style={{ color:"rgba("+rgb+",0.6)",fontSize:12,letterSpacing:"0.2em",fontWeight:300,marginBottom:44 }}>leave a mark for your person</div>
-    <div style={{ display:"flex",gap:22 }}>{ECHO_MARKS.map(function(m) { return <div key={m.n} onClick={function() { onSelect(m); }} style={{ width:64,height:64,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",borderRadius:"50%",border:"1px solid rgba("+rgb+",0.15)",background:"rgba("+rgb+",0.04)",fontSize:24,color:"rgba("+rgb+",0.6)",transition:"all 0.3s" }}>{m.g}</div>; })}</div>
+    <div style={{ display:"flex",gap:22 }}>{marks.current.map(function(m) { return <div key={m.n} onClick={function() { onSelect(m); }} style={{ width:64,height:64,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",borderRadius:"50%",border:"1px solid rgba("+rgb+",0.15)",background:"rgba("+rgb+",0.04)",fontSize:24,color:"rgba("+rgb+",0.6)",transition:"all 0.3s" }}>{m.g}</div>; })}</div>
     <div style={{ marginTop:32,color:"rgba(255,255,255,0.15)",fontSize:9,fontWeight:200 }}>{tm}s</div>
   </div>;
 }
@@ -1228,6 +1422,7 @@ function ReunionReveal({ contribs, reunion, onDone }) {
   var _a = useState(0), al = _a[0], setAl = _a[1];
 
   useEffect(function() {
+    soundArtworkReveal(); hapticReveal();
     var c = cvRef.current; if (!c) return;
     var ctx = c.getContext("2d"), dpr = window.devicePixelRatio || 1, rect = c.getBoundingClientRect();
     c.width = rect.width * dpr; c.height = rect.height * dpr; ctx.scale(dpr, dpr);
