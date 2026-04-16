@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
+import { analyzeGestureFeel } from './constants.js';
 
 // ═══════════════════════════════════════════
 // RESONA — SUPABASE CONFIG
@@ -111,7 +112,7 @@ export async function sendTrace(pairId, senderId, receiverId, path, tone) {
     pair_id: pairId,
     sender_id: senderId,
     receiver_id: receiverId,
-    gesture_data: { path },
+    gesture_data: { path, feel: analyzeGestureFeel(path) },
     emotional_tone: tone,
     signal_type: sig,
     reveal_position: pos,

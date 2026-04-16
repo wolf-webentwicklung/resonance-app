@@ -605,7 +605,6 @@ function ResonanceSpace({ user, pair, onDissolve }) {
   var holdRef = useRef(null), hpR = useRef(0);
   var phR = useRef("idle"), trR = useRef(null), tcR = useRef(null), rtR = useRef([]), reR = useRef([]), cbR = useRef([]);
   var revealTraceR = useRef(null), onbStepR = useRef(0);
-  var escapeTapsR = useRef(0), escapeTapTimeR = useRef(0);
   var partnerHereR = useRef(false), presenceBlendR = useRef(0);
   var epochShiftR = useRef({ hueShift: 0, satBoost: 0 });
   var effectiveRevealPosR = useRef(null);
@@ -1297,6 +1296,13 @@ function ResonanceSpace({ user, pair, onDissolve }) {
     hpR.current = 0;
   }, [user, pair]);
 
+  // ── Glimpse safety: if contribs empty when phase=glimpse, skip straight through ──
+  useEffect(function() {
+    if (phase === "glimpse" && contribs.length === 0) {
+      onGlimpseDone();
+    }
+  }, [phase, contribs.length, onGlimpseDone]);
+
   // ── Finish moment → persist to DB → go to glimpse ──
   var finishMoment = useCallback(async function(extraData) {
     if (currentMoment && pair) {
@@ -1339,12 +1345,15 @@ function ResonanceSpace({ user, pair, onDissolve }) {
   }, [finishMoment]);
 
   var onGlimpseDone = useCallback(async function() {
+    // After discover→reveal→glimpse we know it's the user's turn — set immediately
     setPhase("idle");
+    setCanSend(true);
+    setSentTone(null); setNudgeReady(false); setNudgeSent(false); setSentAt(null);
+    // Server check: may override to false if daily limit hit
     try {
       var cs = await canSendTrace(user.id);
       setCanSend(cs);
-      if (cs) { setSentTone(null); setNudgeReady(false); setNudgeSent(false); setSentAt(null); }
-    } catch (e) { setCanSend(false); }
+    } catch (e) { /* keep canSend(true) on server error */ }
     if (onbStepR.current < 4 && onbStepR.current >= 2) setOnbStep(2);
   }, [user]);
 
@@ -1671,11 +1680,17 @@ function ResonanceSpace({ user, pair, onDissolve }) {
           <div style={{ padding:"16px 0",borderTop:"1px solid rgba(255,255,255,0.06)" }}>
             <div onClick={function() { if (confirm("Dissolve this connection? This cannot be undone.")) { setShowSettings(false); onDissolve(); } }} style={{ color:"rgba(196,30,58,0.6)",fontSize:14,fontWeight:200,letterSpacing:"0.1em",cursor:"pointer" }}>Dissolve Connection</div>
           </div>
+
+          {/* Reload */}
+          <div style={{ padding:"16px 0",borderTop:"1px solid rgba(255,255,255,0.06)" }}>
+            <div onClick={function() { window.location.reload(); }} style={{ color:"rgba(255,255,255,0.3)",fontSize:13,fontWeight:200,letterSpacing:"0.1em",cursor:"pointer" }}>Reload App</div>
+            <div style={{ color:"rgba(255,255,255,0.2)",fontSize:11,fontWeight:200,marginTop:4 }}>if something feels stuck</div>
+          </div>
         </div>
       </div> : null}
 
-      {/* Status — 5× tap here to force reload (escape from stuck state) */}
-      <div onClick={function() { var now = Date.now(); if (now - escapeTapTimeR.current > 2000) { escapeTapsR.current = 0; } escapeTapTimeR.current = now; escapeTapsR.current++; if (escapeTapsR.current >= 5) { escapeTapsR.current = 0; window.location.reload(); } }} style={{ position:"absolute",top:22,left:0,right:0,textAlign:"center",zIndex:10,pointerEvents:"auto",fontFamily:FONT,cursor:"default" }}>
+      {/* Status */}
+      <div style={{ position:"absolute",top:22,left:0,right:0,textAlign:"center",zIndex:10,pointerEvents:"none",fontFamily:FONT }}>
         {phase === "discovery" && trace ? <div style={{ animation:"fadeIn 1s ease" }}>
           <span style={{ color:"rgba("+trRgb+",0.65)",fontSize:15,letterSpacing:"0.28em",fontWeight:300,textShadow:"0 0 25px rgba("+trRgb+",0.2)" }}>SOMETHING IS HERE</span>
           {onbStep === 0 ? <div style={{ marginTop:6,color:"rgba(255,255,255,0.63)",fontSize:13,letterSpacing:"0.15em",fontWeight:200 }}>someone left something for you</div> : null}
@@ -1705,7 +1720,7 @@ function ResonanceSpace({ user, pair, onDissolve }) {
       {phase === "revealing" && trace ? <RevealCanvas tone={trace.emotional_tone} path={trace.gesture_data.path} amplified={trace.gesture_data.path && analyzeGesture(trace.gesture_data.path).intensity > 0.5} pulseGesture={pendPulse} onDone={onRevealDone} /> : null}
 
       {/* Glimpse */}
-      {phase === "glimpse" && contribs.length > 0 ? <GlimpseCanvas contribs={contribs} onDone={onGlimpseDone} /> : null}
+      {phase === "glimpse" && contribs.length > 0 ? <div onClick={onGlimpseDone} style={{ position:"absolute",inset:0,zIndex:34 }}><GlimpseCanvas contribs={contribs} onDone={onGlimpseDone} /></div> : null}
 
       {/* Trace creation */}
       {phase === "creating" ? <TraceCreationUI onSend={onSendTrace} onCancel={function() { setPhase("idle"); }} guided={onbStep <= 3} /> : null}
