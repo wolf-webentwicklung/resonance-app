@@ -73,7 +73,7 @@ async function checkTraceConvergence(pairId, justDiscoveredTrace) {
   var pathB = other.gesture_data.path;
   if (!pathA || !pathB || pathA.length < 3 || pathB.length < 3) return null;
 
-  var overlapRadius = 0.08;
+  var overlapRadius = 0.12;
   var overlapCount = 0;
   pathA.forEach(function(ptA) {
     for (var i = 0; i < pathB.length; i++) {
@@ -83,7 +83,7 @@ async function checkTraceConvergence(pairId, justDiscoveredTrace) {
   });
 
   var overlapRatio = overlapCount / pathA.length;
-  if (overlapRatio < 0.55) return null;
+  if (overlapRatio < 0.45) return null;
 
   return {
     type: 'trace_convergence',

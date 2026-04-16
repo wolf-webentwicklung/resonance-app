@@ -165,7 +165,7 @@ function OnboardingAnim({ step, w, h, ctx }) {
   // Step 1: "your person discovers it" — searching glow finding a hidden point
   if (step === 1) {
     return function(t) {
-      var cycle = (t * 0.6) % 5;
+      var cycle = (t * 1.2) % 5;
       var targetX = w * 0.55, targetY = h * 0.32;
       // Searching finger position — spirals toward target
       var searchProgress = Math.min(1, cycle / 3);
@@ -677,10 +677,15 @@ function ResonanceSpace({ user, pair, onDissolve }) {
             if (rev) {
               if (rev.status === "accepted") {
                 var revSeen = false; try { revSeen = !!sessionStorage.getItem("seen_reveal_" + rev.id); } catch(e) {}
-                if (!revSeen) { setReunion(rev); foundUI = "reveal"; }
+                if (!revSeen) {
+                  // Only overwrite reunion state if no reunion proposal was already found
+                  if (!reu) setReunion(rev);
+                  foundUI = "reveal";
+                }
               }
               if (!foundUI && rev.status === "pending" && rev.proposed_by !== user.id) {
-                setReunion(rev); foundUI = "incoming_reveal";
+                if (!reu) setReunion(rev);
+                foundUI = "incoming_reveal";
               }
             }
           }
@@ -688,7 +693,8 @@ function ResonanceSpace({ user, pair, onDissolve }) {
           if (!foundUI) {
             var rst = await getActiveProposal(pair.id, 'reset');
             if (rst && rst.status === "pending" && rst.proposed_by !== user.id) {
-              setReunion(rst); foundUI = "incoming_reset";
+              if (!reu) setReunion(rst);
+              foundUI = "incoming_reset";
             }
           }
           if (foundUI) setReunionUI(foundUI);
@@ -744,6 +750,11 @@ function ResonanceSpace({ user, pair, onDissolve }) {
 
   // ── Handle incoming resonance event from partner ──
   var handleIncomingEvent = useCallback(function(event) {
+    // Skip events we sent ourselves (can appear in unseen query on reload)
+    if (event.extra_data && event.extra_data.sender_id === user.id) {
+      markEventSeen(event.id, user.id, pair).catch(function() {});
+      return;
+    }
     // Route still_here and nudge to their own handlers
     if (event.type === 'still_here' && event.extra_data && event.extra_data.sender_id !== user.id) {
       setStillHereIncoming(event);
@@ -770,6 +781,7 @@ function ResonanceSpace({ user, pair, onDissolve }) {
       if (phR.current === "idle") {
         setTrace(newTrace);
         setPhase("discovery");
+        setCanSend(false);
         setSentTone(null); setTurnWaiting(false); setTurnNudgeReady(false); setTurnNudgeSent(false);
         soundIncoming();
         hapticMedium();
@@ -1431,10 +1443,12 @@ function ResonanceSpace({ user, pair, onDissolve }) {
   // ── Shared Canvas: automatic detection (both online + cooldown + no recent moment) ──
   useEffect(function() {
     if (!partnerHere || phase !== "idle" || sharedPhase) return;
-    // 24h cooldown
+    // Need at least 6 traces before the feature unlocks
+    if (contribs.length < 6) return;
+    // 7-day cooldown (was 24h — want this to be rare)
     var lastSession = 0;
     try { lastSession = parseInt(localStorage.getItem("last_shared_canvas") || "0"); } catch(e) {}
-    if (Date.now() - lastSession < 24 * 3600000) return;
+    if (Date.now() - lastSession < 7 * 24 * 3600000) return;
     // Check no recent Moment (5h cooldown shared with moments)
     var lastMoment = 0;
     try { lastMoment = parseInt(localStorage.getItem("last_moment_at") || "0"); } catch(e) {}
@@ -1450,7 +1464,7 @@ function ResonanceSpace({ user, pair, onDissolve }) {
       setTimeout(function() { setSharedPhase("drawing"); setSharedTimer(30); }, 3000);
     }, 10000);
     return function() { clearTimeout(timer); };
-  }, [partnerHere, phase, sharedPhase, user]);
+  }, [partnerHere, phase, sharedPhase, contribs.length, user]);
 
   // ── Shared Canvas: timer ──
   useEffect(function() {
@@ -1729,7 +1743,7 @@ function ResonanceSpace({ user, pair, onDissolve }) {
 
       {/* Moment intros */}
       {mPhase === "twin_connection_intro" ? <MomentIntro rgb={mRgb} label="SOMETHING RARE HAPPENED" onDone={onIntroTwinDone} /> : null}
-      {mPhase === "amplified_reveal_intro" ? <MomentIntro rgb={mRgb} label="THIS ONE FELT DIFFERENT" onDone={onIntroAmpDone} /> : null}
+      {mPhase === "amplified_reveal_intro" ? <MomentIntro rgb={mRgb} label="THIS TRACE TOOK TIME" onDone={onIntroAmpDone} /> : null}
       {mPhase === "trace_convergence_intro" ? <MomentIntro rgb={mRgb} label="YOUR TRACES CONVERGED" onDone={onIntroConvDone} /> : null}
 
       {/* Moment pickers */}
@@ -1845,9 +1859,12 @@ function ResonanceSpace({ user, pair, onDissolve }) {
 
       {/* Artwork Reveal */}
       {reunionUI === "reveal" ? <ReunionReveal contribs={contribs} reunion={reunion} onDone={function() {
-        // Don't completeProposal here — partner might still be watching
-        // Mark as seen locally so it doesn't re-trigger on reload
-        if (reunion) { try { sessionStorage.setItem("seen_reveal_" + reunion.id, "1"); } catch(e) {} }
+        // Mark seen in sessionStorage (immediate) + complete in DB after short delay
+        // so partner has time to also see it before it disappears from their reload
+        if (reunion) {
+          try { sessionStorage.setItem("seen_reveal_" + reunion.id, "1"); } catch(e) {}
+          setTimeout(function() { completeProposal(reunion.id).catch(function(){}); }, 30000);
+        }
         setReunionUI("post_reveal");
       }} /> : null}
 
@@ -1945,10 +1962,11 @@ function IncomingMomentDisplay({ event, pair, onDismiss }) {
     </div>;
   }
 
-  // Amplified reveal — deeper resonance indicator
+  // Amplified reveal — the sender finds out their trace had weight
   return <div style={{ position:"absolute",top:"38%",left:0,right:0,textAlign:"center",zIndex:38,pointerEvents:"none",fontFamily:FONT }}>
-    <div style={{ width:6,height:6,borderRadius:"50%",background:"rgba("+rgb+","+(al*0.5)+")",boxShadow:"0 0 30px rgba("+rgb+","+(al*0.25)+")",margin:"0 auto 12px" }} />
-    <span style={{ color:"rgba("+rgb+","+(al*0.45)+")",fontSize:12,letterSpacing:"0.2em",fontWeight:200 }}>this trace resonated deeply</span>
+    <div style={{ width:5,height:5,borderRadius:"50%",background:"rgba("+rgb+","+(al*0.6)+")",boxShadow:"0 0 28px rgba("+rgb+","+(al*0.3)+")",margin:"0 auto 16px",animation:"gentlePulse 2s ease-in-out infinite" }} />
+    <div style={{ color:"rgba(255,255,255,"+(al*0.18)+")",fontSize:11,letterSpacing:"0.35em",fontWeight:200,marginBottom:10 }}>YOUR TRACE REACHED THEM</div>
+    <span style={{ color:"rgba("+rgb+","+(al*0.5)+")",fontSize:14,letterSpacing:"0.18em",fontWeight:200 }}>they stayed with yours</span>
   </div>;
 }
 
