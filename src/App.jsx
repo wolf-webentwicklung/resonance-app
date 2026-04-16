@@ -1516,7 +1516,7 @@ function ResonanceSpace({ user, pair, onDissolve }) {
     soundSend(); hapticSend();
     if (onbStepR.current < 4) setOnbStep(4);
     try {
-      await sendTrace(pair.id, user.id, partnerId, data.path, data.tone, contribs.length === 0);
+      await sendTrace(pair.id, user.id, partnerId, data.path, data.tone, cbR.current.length === 0);
       setContribs(function(prev) { return prev.concat([{ tone: data.tone, path: data.path }]); });
       setRecTones(function(prev) { return [data.tone].concat(prev).slice(0, 5); });
       setLastTone(data.tone);
