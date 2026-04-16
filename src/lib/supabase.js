@@ -274,7 +274,7 @@ export async function getLastNudge(pairId) {
 export async function getLastSentTrace(userId) {
   const { data } = await supabase
     .from('traces')
-    .select('id, created_at, discovered_at')
+    .select('id, created_at, discovered_at, emotional_tone')
     .eq('sender_id', userId)
     .is('discovered_at', null)
     .order('created_at', { ascending: false })
@@ -408,4 +408,44 @@ export function subscribeToProposals(pairId, callback) {
     .on('postgres_changes', { event: '*', schema: 'public', table: 'pair_proposals', filter: 'pair_id=eq.' + pairId },
       (payload) => { callback(payload.new, payload.eventType); })
     .subscribe();
+}
+
+// ── Get last trace in pair (for turn-reminder timing) ──
+export async function getLastPairTrace(pairId) {
+  const { data } = await supabase
+    .from('traces')
+    .select('id, sender_id, created_at, discovered_at')
+    .eq('pair_id', pairId)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .single();
+  return data;
+}
+
+// ── Shared Canvas: create broadcast channel ──
+export function createCanvasChannel(pairId, onStroke, onInvite, onJoin, onDecline) {
+  var ch = supabase.channel('canvas-' + pairId);
+  ch.on('broadcast', { event: 'stroke' }, function(payload) { if (onStroke) onStroke(payload.payload); });
+  ch.on('broadcast', { event: 'canvas_invite' }, function(payload) { if (onInvite) onInvite(payload.payload); });
+  ch.on('broadcast', { event: 'canvas_join' }, function(payload) { if (onJoin) onJoin(payload.payload); });
+  ch.on('broadcast', { event: 'canvas_decline' }, function(payload) { if (onDecline) onDecline(payload.payload); });
+  ch.subscribe();
+  return ch;
+}
+
+export function sendCanvasBroadcast(channel, event, payload) {
+  if (channel) channel.send({ type: 'broadcast', event: event, payload: payload });
+}
+
+// ── Shared Canvas: save result as artwork contribution ──
+export async function saveSharedCanvas(pairId, userId, strokes, tone) {
+  if (!strokes || strokes.length < 3) return;
+  const { error } = await supabase.from('artwork_contributions').insert({
+    pair_id: pairId,
+    trace_id: null,
+    sender_id: userId,
+    path_data: { path: strokes },
+    tone: tone || 'nearness',
+  });
+  if (error) console.error('Failed to save shared canvas:', error);
 }
