@@ -1,6 +1,6 @@
 // ══════════════════════════════════════════
-// Resonance Moment Detection
-// — Cooldown between moments (configurable, default 8h)
+// Resona Moment Detection
+// — Cooldown between moments (configurable, default 5h)
 // — Priority: twin_connection > trace_convergence > amplified_reveal
 // — Only ONE moment per reveal (the highest-priority match)
 // — Events are written to DB so the partner receives them
@@ -26,9 +26,9 @@ function analyzeGesture(path) {
 }
 
 // ── Twin Connection ──
-// TIGHTENED: both users must have sent within the last 5 MINUTES (not 30)
+// Both users must have sent within the last 15 MINUTES
 async function checkTwinConnection(pairId, justSentUserId, tone) {
-  var traces = await getRecentTraces(pairId, 5 / 60); // last 5 minutes
+  var traces = await getRecentTraces(pairId, 15 / 60); // last 15 minutes
   if (traces.length < 2) return null;
 
   var senders = new Set(traces.map(function(t) { return t.sender_id; }));
@@ -43,7 +43,7 @@ async function checkTwinConnection(pairId, justSentUserId, tone) {
 }
 
 // ── Amplified Reveal ──
-// TIGHTENED: needs duration > 3s, dirChanges > 8, intensity > 0.65
+// Now automatic — no picker needed. Triggers on intense gestures.
 function checkAmplifiedReveal(trace) {
   if (!trace || !trace.gesture_data || !trace.gesture_data.path) return null;
   var analysis = analyzeGesture(trace.gesture_data.path);
@@ -53,13 +53,13 @@ function checkAmplifiedReveal(trace) {
       type: 'amplified_reveal',
       tone: trace.emotional_tone,
       triggerTraces: [trace.id],
+      automatic: true,
     };
   }
   return null;
 }
 
 // ── Trace Convergence ──
-// TIGHTENED: needs 55% overlap (was 40%)
 async function checkTraceConvergence(pairId, justDiscoveredTrace) {
   var traces = await getRecentTraces(pairId, 24);
   if (traces.length < 2) return null;
@@ -93,25 +93,20 @@ async function checkTraceConvergence(pairId, justDiscoveredTrace) {
 }
 
 // ── Main detection ──
-// Returns at most ONE moment (the highest-priority one), or null.
-// Checks cooldown against the last resonance event in the DB.
 export async function detectMoment(pairId, userId, justDiscoveredTrace, tone) {
-  // 1. Cooldown check: was there a moment recently?
   try {
     var lastEvent = await getLastResonanceEvent(pairId);
     if (lastEvent) {
       var hoursSince = (Date.now() - new Date(lastEvent.triggered_at).getTime()) / 3600000;
       if (hoursSince < MOMENT_COOLDOWN_HOURS) {
-        return null; // too recent, skip
+        return null;
       }
     }
   } catch (e) {
-    // If DB query fails, skip moment detection rather than block the flow
     console.warn("Moment cooldown check failed:", e);
     return null;
   }
 
-  // 2. Check all conditions
   var candidates = [];
 
   var twin = await checkTwinConnection(pairId, userId, tone);
@@ -125,15 +120,14 @@ export async function detectMoment(pairId, userId, justDiscoveredTrace, tone) {
 
   if (candidates.length === 0) return null;
 
-  // 3. Pick highest priority
   candidates.sort(function(a, b) {
     return (MOMENT_PRIORITY[b.type] || 0) - (MOMENT_PRIORITY[a.type] || 0);
   });
 
-  return candidates[0]; // only the best one
+  return candidates[0];
 }
 
-// ── Persist a moment to the DB (called after user interaction) ──
+// ── Persist a moment to the DB ──
 export async function persistMoment(pairId, moment, extraData) {
   try {
     return await createResonanceEvent(

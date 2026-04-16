@@ -1,7 +1,7 @@
 {
-  "name": "Resonance",
-  "short_name": "Resonance",
-  "description": "A private space for two people to feel each other without words.",
+  "name": "Resona",
+  "short_name": "Resona",
+  "description": "a private space for two people to feel each other without words.",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#0A0A12",

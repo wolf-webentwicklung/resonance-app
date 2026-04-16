@@ -1,5 +1,5 @@
-// Resonance Service Worker — App Shell caching
-var CACHE_NAME = 'resonance-v1';
+// Resona Service Worker — App Shell caching
+var CACHE_NAME = 'resona-v2';
 var SHELL_URLS = [
   '/',
   '/index.html',

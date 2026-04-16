@@ -7,20 +7,24 @@ import {
   subscribeToTraces, subscribeToEvents, subscribeToPair,
   getUnseenEvents, markEventSeen,
   getActiveProposal, proposeReunion, proposeReset, proposeReveal, respondToProposal, completeProposal, executeResetArtwork, subscribeToProposals,
+  sendStillHere, getLastStillHere, sendNudge, getLastNudge, getLastSentTrace,
   supabase
 } from './lib/supabase.js';
 import { detectMoment, persistMoment } from './lib/moments.js';
 import { hapticTap, hapticLight, hapticMedium, hapticReveal, hapticMoment, hapticSend, hapticProximity } from './lib/haptics.js';
-import { initAudio, soundFound, soundReveal, soundMoment, soundSend, soundIncoming, soundArtworkReveal } from './lib/audio.js';
+import { initAudio, soundFound, soundReveal, soundMoment, soundSend, soundIncoming, soundArtworkReveal, soundStillHere, soundNudge, soundTonePreview } from './lib/audio.js';
 import {
   TONES, TONE_KEYS, WHISPER_POOL, ECHO_POOL, GLIMPSE_TEXTS, FONT,
-  lerp, dst, clamp, pick, pickN, hex2, makeNoise, analyzeGesture, drawGesturePath
+  lerp, dst, clamp, pick, pickN, hex2, makeNoise, analyzeGesture, drawGesturePath, drawArtwork,
+  STILL_HERE_COOLDOWN_HOURS, NUDGE_DELAY_HOURS,
+  EPOCH_THRESHOLDS, MILESTONES, TONE_DISCOVERY, RESIDUE_CONFIG, MAX_ECHOES,
+  getEpochShift
 } from './lib/constants.js';
 
 // ══════════════════════════════════════
 // WELCOME SCREEN — with subtle trace animation
 // ══════════════════════════════════════
-function Welcome({ onStart }) {
+function Welcome({ onStart, onSignIn }) {
   var _a = useState(0), al = _a[0], sa = _a[1];
   var cvRef = useRef(null);
   useEffect(function() { setTimeout(function() { sa(1); }, 300); }, []);
@@ -83,16 +87,19 @@ function Welcome({ onStart }) {
   }, []);
 
   return (
-    <div style={{ position:"absolute",inset:0,zIndex:50,background:"#0A0A12",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",fontFamily:FONT,cursor:"pointer",opacity:al,transition:"opacity 1s ease" }} onClick={function() { initAudio(); if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission(); onStart(); }}>
+    <div style={{ position:"absolute",inset:0,zIndex:50,background:"#0A0A12",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",fontFamily:FONT,opacity:al,transition:"opacity 1s ease" }}>
       <canvas ref={cvRef} style={{ position:"absolute",inset:0,width:"100%",height:"100%",pointerEvents:"none" }} />
       <div style={{ position:"relative",zIndex:1,marginBottom:60 }}>
-        <div style={{ fontSize:24,fontWeight:200,letterSpacing:"0.5em",color:"rgba(255,255,255,0.6)",marginBottom:16,textAlign:"center" }}>RESONANCE</div>
+        <div style={{ fontSize:24,fontWeight:200,letterSpacing:"0.5em",color:"rgba(255,255,255,0.6)",marginBottom:16,textAlign:"center" }}>RESONA</div>
         <div style={{ fontSize:12,fontWeight:200,letterSpacing:"0.15em",color:"rgba(255,255,255,0.5)",textAlign:"center",lineHeight:1.8 }}>
           a private space<br/>for two people<br/>to feel each other<br/>without words
         </div>
       </div>
-      <div style={{ position:"relative",zIndex:1,padding:"14px 40px",borderRadius:28,border:"1px solid rgba(255,255,255,0.08)",background:"rgba(255,255,255,0.03)" }}>
+      <div onClick={function() { initAudio(); if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission(); onStart(); }} style={{ position:"relative",zIndex:1,padding:"14px 40px",borderRadius:28,border:"1px solid rgba(255,255,255,0.08)",background:"rgba(255,255,255,0.03)",cursor:"pointer" }}>
         <span style={{ color:"rgba(255,255,255,0.5)",fontSize:12,letterSpacing:"0.2em",fontWeight:200 }}>BEGIN</span>
+      </div>
+      <div onClick={function(ev) { ev.stopPropagation(); onSignIn(); }} style={{ position:"relative",zIndex:1,marginTop:24,cursor:"pointer",padding:"8px 16px" }}>
+        <span style={{ color:"rgba(255,255,255,0.25)",fontSize:10,letterSpacing:"0.1em",fontWeight:200 }}>already have an account?</span>
       </div>
     </div>
   );
@@ -205,7 +212,7 @@ function PairSetup({ onPaired, userId }) {
 
   return (
     <div style={{ position:"absolute",inset:0,zIndex:50,background:"#0A0A12",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",fontFamily:FONT }}>
-      <div style={{ fontSize:16,fontWeight:200,letterSpacing:"0.35em",color:"rgba(255,255,255,0.55)",marginBottom:50 }}>RESONANCE</div>
+      <div style={{ fontSize:16,fontWeight:200,letterSpacing:"0.35em",color:"rgba(255,255,255,0.55)",marginBottom:50 }}>RESONA</div>
       {err ? <div style={{ color:"rgba(196,30,58,0.6)",fontSize:10,marginBottom:20,letterSpacing:"0.1em" }}>{err}</div> : null}
       {mode === "choose" ? (
         <div style={{ display:"flex",flexDirection:"column",gap:20,alignItems:"center" }}>
@@ -221,7 +228,7 @@ function PairSetup({ onPaired, userId }) {
           <div onClick={function() {
             var url = window.location.origin + "?code=" + invite;
             if (navigator.share) {
-              navigator.share({ title: "Resonance", text: "Join me on Resonance", url: url }).catch(function(){});
+              navigator.share({ title: "Resona", text: "Join me on Resona", url: url }).catch(function(){});
             } else {
               try { navigator.clipboard.writeText(url); } catch(e) {}
             }
@@ -280,6 +287,26 @@ export default function App() {
   }, []);
 
   var handleStart = useCallback(function() { setAppPhase("onboarding"); }, []);
+  var handleSignIn = useCallback(function() { setAppPhase("signin"); }, []);
+  var handleSignInDone = useCallback(async function() {
+    // After magic link sign-in, re-check user and pair
+    try {
+      var u = await ensureUser();
+      setUser(u);
+      var p = await getPair(u.id);
+      if (p && p.status === "active") {
+        setPair(p);
+        setAppPhase("space");
+      } else {
+        // Signed in but no pair — go to pairing
+        setAppPhase("pairing");
+      }
+    } catch (e) {
+      console.error("Sign-in check error:", e);
+      setAppPhase("welcome");
+    }
+  }, []);
+  var handleSignInBack = useCallback(function() { setAppPhase("welcome"); }, []);
   var handleOnboardingDone = useCallback(function() { setAppPhase("pairing"); }, []);
   var handlePaired = useCallback(async function(pairId) {
     var p = await getPair(user.id);
@@ -295,7 +322,7 @@ export default function App() {
   if (appPhase === "loading") {
     return (
       <div style={{ width:"100%",height:"100vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",background:"#0A0A12",fontFamily:FONT,gap:20 }}>
-        <div style={{ color:"rgba(255,255,255,0.6)",fontSize:12,letterSpacing:"0.3em",fontWeight:200 }}>RESONANCE</div>
+        <div style={{ color:"rgba(255,255,255,0.6)",fontSize:12,letterSpacing:"0.3em",fontWeight:200 }}>RESONA</div>
         {initError ? (
           <div style={{ maxWidth:340,textAlign:"center",padding:"16px 20px",borderRadius:12,background:"rgba(196,30,58,0.08)",border:"1px solid rgba(196,30,58,0.15)" }}>
             <div style={{ color:"rgba(196,30,58,0.7)",fontSize:10,letterSpacing:"0.05em",fontWeight:300,lineHeight:1.6 }}>{initError}</div>
@@ -307,7 +334,8 @@ export default function App() {
     );
   }
 
-  if (appPhase === "welcome") return <Welcome onStart={handleStart} />;
+  if (appPhase === "welcome") return <Welcome onStart={handleStart} onSignIn={handleSignIn} />;
+  if (appPhase === "signin") return <SignInUI onDone={handleSignInDone} onBack={handleSignInBack} />;
   if (appPhase === "onboarding") return <Onboarding onDone={handleOnboardingDone} />;
   if (appPhase === "pairing") return <PairSetup onPaired={handlePaired} userId={user ? user.id : null} />;
   return <ResonanceSpace user={user} pair={pair} onDissolve={handleDissolve} />;
@@ -330,7 +358,7 @@ function ResonanceSpace({ user, pair, onDissolve }) {
   var _st = useState(null), sentTone = _st[0], setSentTone = _st[1];
   var _cb = useState([]), contribs = _cb[0], setContribs = _cb[1];
   var _rt = useState([]), recTones = _rt[0], setRecTones = _rt[1];
-  var _re = useState(null), resEcho = _re[0], setResEcho = _re[1];
+  var _re = useState([]), resEchoes = _re[0], setResEchoes = _re[1]; // Array of echoes
   var _idle = useState(0), idleT = _idle[0], setIdleT = _idle[1];
   var _set = useState(false), showSettings = _set[0], setShowSettings = _set[1];
   var _email = useState(false), showEmail = _email[0], setShowEmail = _email[1];
@@ -363,21 +391,43 @@ function ResonanceSpace({ user, pair, onDissolve }) {
   var _pres = useState(false), partnerHere = _pres[0], setPartnerHere = _pres[1];
   var dayCount = pair ? Math.max(1, Math.ceil((Date.now() - new Date(pair.created_at).getTime()) / 86400000)) : 0;
 
+  // ── Still-here gesture state ──
+  var _shReady = useState(false), stillHereReady = _shReady[0], setStillHereReady = _shReady[1];
+  var _shSent = useState(false), stillHereSent = _shSent[0], setStillHereSent = _shSent[1];
+  var _shHold = useState(0), stillHereHold = _shHold[0], setStillHereHold = _shHold[1];
+  var _shInc = useState(null), stillHereIncoming = _shInc[0], setStillHereIncoming = _shInc[1];
+  var stillHereHoldRef = useRef(null);
+
+  // ── Nudge state ──
+  var _nudgeReady = useState(false), nudgeReady = _nudgeReady[0], setNudgeReady = _nudgeReady[1];
+  var _nudgeSent = useState(false), nudgeSent = _nudgeSent[0], setNudgeSent = _nudgeSent[1];
+  var _nudgeConfirm = useState(false), nudgeConfirm = _nudgeConfirm[0], setNudgeConfirm = _nudgeConfirm[1];
+  var _nudgeInc = useState(null), nudgeIncoming = _nudgeInc[0], setNudgeIncoming = _nudgeInc[1];
+  var _sentAt = useState(null), sentAt = _sentAt[0], setSentAt = _sentAt[1];
+
+  // ── Milestone state ──
+  var _mile = useState(null), milestone = _mile[0], setMilestone = _mile[1];
+
   var cvRef = useRef(null);
   var nf1 = useRef(makeNoise()), nf2 = useRef(makeNoise()), nf3 = useRef(makeNoise());
   var timeR = useRef(0), afR = useRef(null);
   var particles = useRef(Array.from({ length: 60 }, function() { return { x:Math.random(),y:Math.random(),vx:0,vy:0,size:1+Math.random()*2.5,ba:0.04+Math.random()*0.1 }; }));
   var holdRef = useRef(null), hpR = useRef(0);
-  var phR = useRef("idle"), trR = useRef(null), tcR = useRef(null), rtR = useRef([]), reR = useRef(null), cbR = useRef([]);
+  var phR = useRef("idle"), trR = useRef(null), tcR = useRef(null), rtR = useRef([]), reR = useRef([]), cbR = useRef([]);
   var revealTraceR = useRef(null), onbStepR = useRef(0);
+  var partnerHereR = useRef(false), presenceBlendR = useRef(0);
+  var epochShiftR = useRef({ hueShift: 0, satBoost: 0 });
+  var effectiveRevealPosR = useRef(null);
 
   useEffect(function() { phR.current = phase; }, [phase]);
   useEffect(function() { trR.current = trace; }, [trace]);
   useEffect(function() { tcR.current = touch; }, [touch]);
   useEffect(function() { rtR.current = recTones; }, [recTones]);
-  useEffect(function() { reR.current = resEcho; }, [resEcho]);
+  useEffect(function() { reR.current = resEchoes; }, [resEchoes]);
   useEffect(function() { cbR.current = contribs; }, [contribs]);
   useEffect(function() { onbStepR.current = onbStep; }, [onbStep]);
+  useEffect(function() { partnerHereR.current = partnerHere; }, [partnerHere]);
+  useEffect(function() { epochShiftR.current = getEpochShift(contribs.length); }, [contribs]);
 
   // ── Clear errors after 5s ──
   useEffect(function() {
@@ -452,6 +502,29 @@ function ResonanceSpace({ user, pair, onDissolve }) {
           }
           if (foundUI) setReunionUI(foundUI);
         } catch (e) { /* table might not exist yet */ }
+
+        // Check still-here cooldown
+        try {
+          var lastSH = await getLastStillHere(pair.id);
+          if (!lastSH || (Date.now() - new Date(lastSH.triggered_at).getTime()) > STILL_HERE_COOLDOWN_HOURS * 3600000) {
+            setStillHereReady(true);
+          }
+        } catch (e) { setStillHereReady(true); }
+
+        // Check nudge eligibility (only if we have a pending sent trace)
+        try {
+          var lastSent = await getLastSentTrace(user.id);
+          if (lastSent && !lastSent.discovered_at) {
+            setSentAt(new Date(lastSent.created_at).getTime());
+            var sentHoursAgo = (Date.now() - new Date(lastSent.created_at).getTime()) / 3600000;
+            if (sentHoursAgo >= NUDGE_DELAY_HOURS) {
+              var lastNdg = await getLastNudge(pair.id);
+              if (!lastNdg || new Date(lastNdg.triggered_at).getTime() < new Date(lastSent.created_at).getTime()) {
+                setNudgeReady(true);
+              }
+            }
+          }
+        } catch (e) { /* ignore */ }
       } catch (e) {
         console.error("Init error:", e);
         setAppError("Failed to load. Pull down to retry.");
@@ -461,8 +534,22 @@ function ResonanceSpace({ user, pair, onDissolve }) {
 
   // ── Handle incoming resonance event from partner ──
   var handleIncomingEvent = useCallback(function(event) {
+    // Route still_here and nudge to their own handlers
+    if (event.type === 'still_here' && event.extra_data && event.extra_data.sender_id !== user.id) {
+      setStillHereIncoming(event);
+      markEventSeen(event.id, user.id, pair).catch(function() {});
+      return;
+    }
+    if (event.type === 'nudge' && event.extra_data && event.extra_data.sender_id !== user.id) {
+      setNudgeIncoming(event);
+      markEventSeen(event.id, user.id, pair).catch(function() {});
+      // Browser notification for nudge
+      if (document.visibilityState === 'hidden' && 'Notification' in window && Notification.permission === 'granted') {
+        try { new Notification('Resona', { body: 'someone is thinking of you', icon: '/icon-192.png', tag: 'nudge' }); } catch (e) {}
+      }
+      return;
+    }
     setIncomingMoment(event);
-    // Mark as seen
     markEventSeen(event.id, user.id, pair).catch(function() {});
   }, [user, pair]);
 
@@ -478,7 +565,7 @@ function ResonanceSpace({ user, pair, onDissolve }) {
       }
       // Browser notification when in background
       if (document.visibilityState === 'hidden' && 'Notification' in window && Notification.permission === 'granted') {
-        try { new Notification('Resonance', { body: 'someone left something for you', icon: '/icon-192.png', tag: 'trace' }); } catch (e) {}
+        try { new Notification('Resona', { body: 'someone left something for you', icon: '/icon-192.png', tag: 'trace' }); } catch (e) {}
       }
     });
     return function() { sub.unsubscribe(); };
@@ -650,10 +737,26 @@ function ResonanceSpace({ user, pair, onDissolve }) {
       timeR.current += 0.007; var t = timeR.current;
       var hp = hpR.current, ph = phR.current, tr = trR.current, tc = tcR.current, rt = rtR.current, re = reR.current;
 
+      // ── Presence blend: smooth transition when partner is here ──
+      var targetBlend = partnerHereR.current ? 1 : 0;
+      presenceBlendR.current += (targetBlend - presenceBlendR.current) * 0.008;
+      var pBlend = presenceBlendR.current;
+      var epoch = epochShiftR.current;
+
       ctx.fillStyle = "#0A0A12"; ctx.fillRect(0, 0, w, h);
 
-      // 3-layer noise — smooth organic atmosphere
-      var breath = Math.sin(t * 0.4) * 0.25 + 0.55, step = 5, rr = 10, rg = 10, rb = 18;
+      // 3-layer noise — smooth organic atmosphere with presence + epoch influence
+      var breath = Math.sin(t * 0.4) * 0.25 + 0.55;
+      // Partner presence makes breathing deeper + adds second rhythm
+      breath = breath * (1 + pBlend * 0.3) + Math.sin(t * 0.27 + 1.5) * 0.12 * pBlend;
+      var step = 5, rr = 10, rg = 10, rb = 18;
+      // Epoch shift: space gets warmer over time
+      rr += epoch.hueShift * 45;
+      rg += epoch.hueShift * 12;
+      rb -= epoch.hueShift * 15;
+      // Partner presence warms the space
+      rr += pBlend * 12;
+      rg += pBlend * 6;
       if (rt.length > 0) {
         var t2 = 0, g2 = 0, b2 = 0;
         rt.forEach(function(tn) { if (TONES[tn]) { t2 += TONES[tn].rgb[0]; g2 += TONES[tn].rgb[1]; b2 += TONES[tn].rgb[2]; } });
@@ -663,7 +766,8 @@ function ResonanceSpace({ user, pair, onDissolve }) {
       var dT = 0, bB = 0;
       if (ph === "discovery" && tr && TONES[tr.emotional_tone]) {
         dT = 0.02;
-        if (tc) { var dR = dst(tc.x, tc.y, tr.reveal_position.x, tr.reveal_position.y) / Math.sqrt(2); if (dR < 0.6) { var pf = 1 - dR / 0.6; dT += pf * 0.18; bB = pf * 0.05; } }
+        var epR = effectiveRevealPosR.current || tr.reveal_position;
+        if (tc) { var dR = dst(tc.x, tc.y, epR.x, epR.y) / Math.sqrt(2); if (dR < 0.6) { var pf = 1 - dR / 0.6; dT += pf * 0.18; bB = pf * 0.05; } }
       }
       for (var x = 0; x < w; x += step) { for (var y = 0; y < h; y += step) {
         var nv = ((n1(x*0.002+t*0.08,y*0.002+t*0.06)*0.45 + n2(x*0.004+t*0.04+30,y*0.004-t*0.05+30)*0.35 + n3(x*0.008+t*0.12+60,y*0.008+t*0.09+60)*0.2)+1)/2*breath;
@@ -674,17 +778,41 @@ function ResonanceSpace({ user, pair, onDissolve }) {
         ctx.fillRect(x, y, step, step);
       }}
 
-      // Residue echo (last revealed trace as ghost)
-      if (re && ph === "idle") {
-        var eA = Math.max(0, 0.06 * (1 - (Date.now() - re.at) / 300000));
-        if (eA > 0.003 && re.path && re.path.length > 1) {
-          var eT = TONES[re.tone]; if (eT) {
-            ctx.globalAlpha = eA; ctx.globalCompositeOperation = "screen";
-            ctx.beginPath(); ctx.strokeStyle = eT.primary; ctx.lineWidth = 1; ctx.lineCap = "round";
-            re.path.forEach(function(p2, i) { var px = (p2.x*0.3+0.35)*w, py = (p2.y*0.3+0.3)*h; i === 0 ? ctx.moveTo(px,py) : ctx.lineTo(px,py); });
-            ctx.stroke(); ctx.globalAlpha = 1; ctx.globalCompositeOperation = "source-over";
-          }
-        }
+      // ── Partner presence: subtle particle drift toward center when both online ──
+      if (pBlend > 0.3) {
+        var pcx = w * 0.5, pcy = h * 0.45;
+        pts.forEach(function(p2) {
+          var dirX = (pcx - p2.x * w) * 0.00003 * pBlend;
+          var dirY = (pcy - p2.y * h) * 0.00003 * pBlend;
+          p2.vx += dirX; p2.vy += dirY;
+        });
+      }
+
+      // ── Residue echoes (array of recent traces as drifting ghosts) ──
+      if (re.length > 0 && ph === "idle") {
+        re.forEach(function(echo, ei) {
+          if (!echo || !echo.path || echo.path.length < 2) return;
+          var cfg = RESIDUE_CONFIG[ei];
+          if (!cfg) return;
+          var age = Date.now() - echo.at;
+          if (age > cfg.maxAge) return;
+          var eA = cfg.baseAlpha * (1 - age / cfg.maxAge);
+          // Amplified echoes last longer and are brighter
+          if (echo.amplified) { eA *= 2; }
+          if (eA < 0.003) return;
+          var eT = TONES[echo.tone]; if (!eT) return;
+          // Drift: each ghost slowly moves
+          var drift = (ei + 1) * 0.00008;
+          var driftX = Math.sin(t * 0.3 + ei * 2.1) * drift;
+          var driftY = Math.cos(t * 0.25 + ei * 1.7) * drift;
+          ctx.globalAlpha = eA; ctx.globalCompositeOperation = "screen";
+          ctx.beginPath(); ctx.strokeStyle = eT.primary; ctx.lineWidth = 1.5 - ei * 0.3; ctx.lineCap = "round";
+          echo.path.forEach(function(p2, i) {
+            var px = (p2.x * 0.3 + 0.35 + driftX) * w, py = (p2.y * 0.3 + 0.3 + driftY) * h;
+            i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+          });
+          ctx.stroke(); ctx.globalAlpha = 1; ctx.globalCompositeOperation = "source-over";
+        });
       }
 
       // NOTE: Artwork underlay REMOVED — artwork only visible during Glimpse
@@ -692,7 +820,18 @@ function ResonanceSpace({ user, pair, onDissolve }) {
       // Discovery rendering
       if (ph === "discovery" && tr) {
         var tone = tr.emotional_tone;
-        var tx = tr.reveal_position.x * w, ty = tr.reveal_position.y * h;
+        // Playfulness drift: reveal position slowly moves in a circle
+        var baseX = tr.reveal_position.x, baseY = tr.reveal_position.y;
+        var driftSpd = tr.reveal_position.drift_speed || 0;
+        if (driftSpd > 0) {
+          baseX += Math.sin(t * driftSpd) * 0.04;
+          baseY += Math.cos(t * driftSpd * 0.7) * 0.03;
+          baseX = clamp(baseX, 0.08, 0.92);
+          baseY = clamp(baseY, 0.08, 0.85);
+        }
+        var tx = baseX * w, ty = baseY * h;
+        // Store effective position for touch handlers
+        effectiveRevealPosR.current = { x: baseX, y: baseY };
         var td = TONES[tone];
         var cr3 = td ? td.rgb[0] : 180, cg3 = td ? td.rgb[1] : 180, cb3 = td ? td.rgb[2] : 220;
         var sig = tr.signal_type, sp = 0.5 + Math.sin(t*2) * 0.3;
@@ -707,20 +846,20 @@ function ResonanceSpace({ user, pair, onDissolve }) {
 
         // Proximity zones
         if (tc) {
-          var dN2 = dst(tc.x, tc.y, tr.reveal_position.x, tr.reveal_position.y) / Math.sqrt(2);
-          if (dN2 < 0.10) {
-            var z4 = 1-dN2/0.10;
+          var dN2 = dst(tc.x, tc.y, baseX, baseY) / Math.sqrt(2);
+          if (dN2 < 0.14) {
+            var z4 = 1-dN2/0.14;
             var bl = ctx.createRadialGradient(tx,ty,0,tx,ty,25+z4*70); bl.addColorStop(0,"rgba("+cr3+","+cg3+","+cb3+","+(z4*0.45)+")"); bl.addColorStop(0.4,"rgba("+cr3+","+cg3+","+cb3+","+(z4*0.15)+")"); bl.addColorStop(1,"transparent"); ctx.fillStyle = bl; ctx.beginPath(); ctx.arc(tx,ty,25+z4*70,0,Math.PI*2); ctx.fill();
             ctx.strokeStyle = "rgba("+cr3+","+cg3+","+cb3+","+(z4*0.15)+")"; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(tc.x*w,tc.y*h); ctx.lineTo(tx,ty); ctx.stroke();
             var gl4 = ctx.createRadialGradient(tc.x*w,tc.y*h,0,tc.x*w,tc.y*h,60); gl4.addColorStop(0,"rgba("+cr3+","+cg3+","+cb3+",0.4)"); gl4.addColorStop(1,"transparent"); ctx.fillStyle = gl4; ctx.beginPath(); ctx.arc(tc.x*w,tc.y*h,60,0,Math.PI*2); ctx.fill();
             pts.forEach(function(p2) { var px = p2.x*w, py = p2.y*h, pd = dst(px,py,tc.x*w,tc.y*h), inf = Math.max(0,1-pd/120); p2.vx += (tc.x*w-px)*inf*0.0015; p2.vy += (tc.y*h-py)*inf*0.0015; p2.vx *= 0.9; p2.vy *= 0.9; p2.x += p2.vx/w; p2.y += p2.vy/h; p2.x = ((p2.x%1)+1)%1; p2.y = ((p2.y%1)+1)%1; ctx.fillStyle = "rgba("+cr3+","+cg3+","+cb3+","+(p2.ba*5)+")"; ctx.beginPath(); ctx.arc(p2.x*w,p2.y*h,p2.size*2,0,Math.PI*2); ctx.fill(); });
-          } else if (dN2 < 0.30) {
-            var z3 = 1-(dN2-0.10)/0.20;
+          } else if (dN2 < 0.35) {
+            var z3 = 1-(dN2-0.14)/0.21;
             var gl = ctx.createRadialGradient(tc.x*w,tc.y*h,0,tc.x*w,tc.y*h,40+z3*140); gl.addColorStop(0,"rgba("+cr3+","+cg3+","+cb3+","+(z3*0.35)+")"); gl.addColorStop(0.3,"rgba("+cr3+","+cg3+","+cb3+","+(z3*0.12)+")"); gl.addColorStop(1,"transparent"); ctx.fillStyle = gl; ctx.beginPath(); ctx.arc(tc.x*w,tc.y*h,40+z3*140,0,Math.PI*2); ctx.fill();
             for (var oi = 0; oi < 8; oi++) { var oA = (oi/8)*Math.PI*2+t*2, oR = 25+z3*15+Math.sin(t*3+oi)*5; ctx.fillStyle = "rgba("+cr3+","+cg3+","+cb3+","+(z3*0.3)+")"; ctx.beginPath(); ctx.arc(tc.x*w+Math.cos(oA)*oR,tc.y*h+Math.sin(oA)*oR,2+z3,0,Math.PI*2); ctx.fill(); }
             pts.forEach(function(p2) { var px = p2.x*w, py = p2.y*h, pd = dst(px,py,tc.x*w,tc.y*h), inf = Math.max(0,1-pd/(80+z3*50)); p2.vx += (tc.x*w-px)*inf*0.001*z3; p2.vy += (tc.y*h-py)*inf*0.001*z3; p2.vx *= 0.92; p2.vy *= 0.92; p2.x += p2.vx/w; p2.y += p2.vy/h; p2.x = ((p2.x%1)+1)%1; p2.y = ((p2.y%1)+1)%1; ctx.fillStyle = "rgba("+cr3+","+cg3+","+cb3+","+(p2.ba*(1+z3*4))+")"; ctx.beginPath(); ctx.arc(p2.x*w,p2.y*h,p2.size*(1+z3),0,Math.PI*2); ctx.fill(); });
           } else if (dN2 < 0.60) {
-            var z2 = 1-(dN2-0.30)/0.30;
+            var z2 = 1-(dN2-0.35)/0.25;
             var hz = ctx.createRadialGradient(tc.x*w,tc.y*h,0,tc.x*w,tc.y*h,70+z2*50); hz.addColorStop(0,"rgba("+cr3+","+cg3+","+cb3+","+(z2*0.22)+")"); hz.addColorStop(1,"transparent"); ctx.fillStyle = hz; ctx.beginPath(); ctx.arc(tc.x*w,tc.y*h,70+z2*50,0,Math.PI*2); ctx.fill();
             pts.forEach(function(p2) { var px = p2.x*w, py = p2.y*h, pd = dst(px,py,tc.x*w,tc.y*h), inf = Math.max(0,1-pd/(150+z2*80)); p2.vx += (tc.x*w-px)*inf*0.0003*z2; p2.vy += (tc.y*h-py)*inf*0.0003*z2; p2.vx *= 0.93; p2.vy *= 0.93; p2.x += p2.vx/w; p2.y += p2.vy/h; p2.x = ((p2.x%1)+1)%1; p2.y = ((p2.y%1)+1)%1; ctx.fillStyle = "rgba("+cr3+","+cg3+","+cb3+","+(p2.ba*(1+z2*3))+")"; ctx.beginPath(); ctx.arc(p2.x*w,p2.y*h,p2.size*(1+z2*0.5),0,Math.PI*2); ctx.fill(); });
           } else {
@@ -728,8 +867,8 @@ function ResonanceSpace({ user, pair, onDissolve }) {
           }
           if (hp > 0) {
             ctx.strokeStyle = "rgba("+cr3+","+cg3+","+cb3+","+(0.4+hp*0.6)+")"; ctx.lineWidth = 3;
-            ctx.beginPath(); ctx.arc(tc.x*w,tc.y*h,26,-Math.PI/2,-Math.PI/2+hp*Math.PI*2); ctx.stroke();
-            var ig = ctx.createRadialGradient(tc.x*w,tc.y*h,0,tc.x*w,tc.y*h,22); ig.addColorStop(0,"rgba("+cr3+","+cg3+","+cb3+","+(hp*0.5)+")"); ig.addColorStop(1,"transparent"); ctx.fillStyle = ig; ctx.beginPath(); ctx.arc(tc.x*w,tc.y*h,22,0,Math.PI*2); ctx.fill();
+            ctx.beginPath(); ctx.arc(tc.x*w,tc.y*h,34,-Math.PI/2,-Math.PI/2+hp*Math.PI*2); ctx.stroke();
+            var ig = ctx.createRadialGradient(tc.x*w,tc.y*h,0,tc.x*w,tc.y*h,28); ig.addColorStop(0,"rgba("+cr3+","+cg3+","+cb3+","+(hp*0.5)+")"); ig.addColorStop(1,"transparent"); ctx.fillStyle = ig; ctx.beginPath(); ctx.arc(tc.x*w,tc.y*h,28,0,Math.PI*2); ctx.fill();
           }
         } else {
           pts.forEach(function(p2) { p2.vx *= 0.88; p2.vy *= 0.88; p2.x += (Math.random()-0.5)*0.001; p2.y += (Math.random()-0.5)*0.001; });
@@ -768,16 +907,18 @@ function ResonanceSpace({ user, pair, onDissolve }) {
     if (phase !== "discovery" || !trace) return;
     var r = ev.currentTarget.getBoundingClientRect(), x = (ev.clientX-r.left)/r.width, y = (ev.clientY-r.top)/r.height;
     setTouch({ x, y }); tcR.current = { x, y }; hapticTap();
-    if (dst(x, y, trace.reveal_position.x, trace.reveal_position.y) / Math.sqrt(2) < (trace.search_radius || 0.08)) startHold();
+    var ep = effectiveRevealPosR.current || trace.reveal_position;
+    if (dst(x, y, ep.x, ep.y) / Math.sqrt(2) < (trace.search_radius || 0.08)) startHold();
   }, [phase, trace, startHold]);
 
   var onMove = useCallback(function(ev) {
     if (phase !== "discovery" || !trace) return;
     var r = ev.currentTarget.getBoundingClientRect(), x = (ev.clientX-r.left)/r.width, y = (ev.clientY-r.top)/r.height;
     setTouch({ x, y }); tcR.current = { x, y };
-    var d = dst(x, y, trace.reveal_position.x, trace.reveal_position.y) / Math.sqrt(2);
+    var ep = effectiveRevealPosR.current || trace.reveal_position;
+    var d = dst(x, y, ep.x, ep.y) / Math.sqrt(2);
     // Proximity feedback — trigger on zone changes, not every frame
-    var zone = d < 0.08 ? 4 : d < 0.15 ? 3 : d < 0.30 ? 2 : d < 0.50 ? 1 : 0;
+    var zone = d < 0.10 ? 4 : d < 0.18 ? 3 : d < 0.35 ? 2 : d < 0.55 ? 1 : 0;
     if (zone > 0 && zone !== lastProxZone.current) { hapticProximity(zone / 4); }
     lastProxZone.current = zone;
     if (d < (trace.search_radius || 0.08)) { if (!holdRef.current) startHold(); } else stopHold();
@@ -802,21 +943,52 @@ function ResonanceSpace({ user, pair, onDissolve }) {
     }
 
     var path = tr.gesture_data.path;
-    setResEcho({ tone: tr.emotional_tone, path: path, at: Date.now() });
-    setContribs(function(prev) { return prev.concat([{ tone: tr.emotional_tone, path: path }]); });
+    // Add to echoes array (max MAX_ECHOES)
+    setResEchoes(function(prev) { return [{ tone: tr.emotional_tone, path: path, at: Date.now(), amplified: false }].concat(prev).slice(0, MAX_ECHOES); });
+    var newContribs;
+    setContribs(function(prev) { newContribs = prev.concat([{ tone: tr.emotional_tone, path: path }]); return newContribs; });
     setRecTones(function(prev) { return [tr.emotional_tone].concat(prev).slice(0, 5); });
     setLastTone(tr.emotional_tone);
     setTrace(null);
     revealTraceR.current = null;
     if (onbStepR.current < 2) setOnbStep(2);
 
+    // Milestone detection
+    if (newContribs) {
+      var count = newContribs.length;
+      for (var mi = 0; mi < MILESTONES.length; mi++) {
+        if (count === MILESTONES[mi].traces) {
+          var key = "milestone_" + MILESTONES[mi].traces;
+          try { if (!localStorage.getItem(key)) { localStorage.setItem(key, "1"); setMilestone(MILESTONES[mi].text); } } catch(e) {}
+          break;
+        }
+      }
+    }
+
     // Detect at most ONE moment (with cooldown + priority)
     try {
       var moment = await detectMoment(pair.id, user.id, tr, tr.emotional_tone);
       if (moment) {
-        setCurrentMoment(moment);
-        setMTone(moment.tone);
-        setMPhase(moment.type + "_intro");
+        // Amplified reveal is now automatic — no picker, just enhanced echo
+        if (moment.automatic) {
+          // Mark the newest echo as amplified (longer life, brighter)
+          setResEchoes(function(prev) {
+            if (prev.length > 0) {
+              var updated = prev.slice();
+              updated[0] = Object.assign({}, updated[0], { amplified: true });
+              return updated;
+            }
+            return prev;
+          });
+          // Auto-persist and show intro then go to glimpse
+          setCurrentMoment(moment);
+          setMTone(moment.tone);
+          setMPhase("amplified_reveal_intro");
+        } else {
+          setCurrentMoment(moment);
+          setMTone(moment.tone);
+          setMPhase(moment.type + "_intro");
+        }
       } else {
         setPhase("glimpse");
       }
@@ -842,7 +1014,8 @@ function ResonanceSpace({ user, pair, onDissolve }) {
 
   // ── Moment transitions ──
   var onIntroTwinDone = useCallback(function() { soundMoment(); hapticMoment(); setMPhase("whisper"); }, []);
-  var onIntroAmpDone = useCallback(function() { soundMoment(); hapticMoment(); setMPhase("pulse"); }, []);
+  // Amplified reveal: auto-persist after intro, then go to glimpse
+  var onIntroAmpDone = useCallback(function() { soundMoment(); hapticMoment(); finishMoment({ amplified: true }); }, [finishMoment]);
   var onIntroConvDone = useCallback(function() { soundMoment(); hapticMoment(); setMPhase("echo"); }, []);
 
   var onWhisperSelect = useCallback(function(w) {
@@ -878,6 +1051,7 @@ function ResonanceSpace({ user, pair, onDissolve }) {
   // ── Send trace ──
   var onSendTrace = useCallback(async function(data) {
     setPhase("idle"); setCanSend(false); setSentTone(data.tone);
+    setSentAt(Date.now()); setNudgeReady(false); setNudgeSent(false);
     soundSend(); hapticSend();
     if (onbStepR.current < 4) setOnbStep(4);
     try {
@@ -892,8 +1066,70 @@ function ResonanceSpace({ user, pair, onDissolve }) {
     }
   }, [pair, user, partnerId]);
 
+  // ── Nudge timer: check if trace has been out long enough ──
+  useEffect(function() {
+    if (!sentAt || canSend || nudgeSent || nudgeReady) return;
+    var remaining = (sentAt + NUDGE_DELAY_HOURS * 3600000) - Date.now();
+    if (remaining <= 0) { setNudgeReady(true); return; }
+    var t = setTimeout(function() { setNudgeReady(true); }, remaining);
+    return function() { clearTimeout(t); };
+  }, [sentAt, canSend, nudgeSent, nudgeReady]);
+
+  // ── Send nudge ──
+  var doSendNudge = useCallback(async function() {
+    setNudgeConfirm(false); setNudgeSent(true); setNudgeReady(false);
+    soundNudge(); hapticLight();
+    try {
+      await sendNudge(pair.id, user.id);
+    } catch (e) { console.error("Nudge error:", e); }
+  }, [pair, user]);
+
+  // ── Still-here gesture handlers ──
+  var startStillHereHold = useCallback(function() {
+    if (stillHereHoldRef.current || !stillHereReady || phase !== "idle") return;
+    var s = Date.now();
+    stillHereHoldRef.current = setInterval(function() {
+      var p2 = Math.min(1, (Date.now() - s) / 2000);
+      setStillHereHold(p2);
+      if (p2 >= 1) {
+        clearInterval(stillHereHoldRef.current); stillHereHoldRef.current = null;
+        setStillHereHold(0); setStillHereReady(false); setStillHereSent(true);
+        soundStillHere(); hapticLight();
+        sendStillHere(pair.id, user.id).catch(function(e) { console.error("Still-here error:", e); });
+        // Reset sent indicator after 3s
+        setTimeout(function() { setStillHereSent(false); }, 3000);
+      }
+    }, 16);
+  }, [stillHereReady, phase, pair, user]);
+
+  var stopStillHereHold = useCallback(function() {
+    if (stillHereHoldRef.current) { clearInterval(stillHereHoldRef.current); stillHereHoldRef.current = null; }
+    setStillHereHold(0);
+  }, []);
+
   // ── Dismiss incoming partner moment ──
   var dismissIncoming = useCallback(function() { setIncomingMoment(null); }, []);
+
+  // ── Dismiss still-here incoming ──
+  useEffect(function() {
+    if (!stillHereIncoming) return;
+    var t = setTimeout(function() { setStillHereIncoming(null); }, 5000);
+    return function() { clearTimeout(t); };
+  }, [stillHereIncoming]);
+
+  // ── Dismiss nudge incoming ──
+  useEffect(function() {
+    if (!nudgeIncoming) return;
+    var t = setTimeout(function() { setNudgeIncoming(null); }, 8000);
+    return function() { clearTimeout(t); };
+  }, [nudgeIncoming]);
+
+  // ── Milestone fade out ──
+  useEffect(function() {
+    if (!milestone) return;
+    var t = setTimeout(function() { setMilestone(null); }, 6000);
+    return function() { clearTimeout(t); };
+  }, [milestone]);
 
   // ── Export artwork as image ──
   var exportArtwork = useCallback(function() {
@@ -902,23 +1138,20 @@ function ResonanceSpace({ user, pair, onDissolve }) {
     var size = 1080; c.width = size; c.height = size;
     var ctx = c.getContext("2d");
     ctx.fillStyle = "#0A0A12"; ctx.fillRect(0, 0, size, size);
-    contribs.forEach(function(ct) {
-      if (!ct.path || ct.path.length < 2) return;
-      drawGesturePath(ctx, ct.path, ct.tone, size, size, 0.7, 10);
-    });
+    drawArtwork(ctx, contribs, size, size, 0.85);
     // Add subtle text
     ctx.fillStyle = "rgba(255,255,255,0.08)"; ctx.font = "200 14px 'Outfit', sans-serif";
-    ctx.textAlign = "center"; ctx.fillText("resonance", size / 2, size - 30);
+    ctx.textAlign = "center"; ctx.fillText("resona", size / 2, size - 30);
     try {
       var link = document.createElement("a");
-      link.download = "resonance-artwork.png";
+      link.download = "resona-artwork.png";
       link.href = c.toDataURL("image/png");
       link.click();
     } catch (e) {
       // Fallback: try share API
       c.toBlob(function(blob) {
         if (navigator.share && blob) {
-          navigator.share({ files: [new File([blob], "resonance-artwork.png", { type: "image/png" })] }).catch(function() {});
+          navigator.share({ files: [new File([blob], "resona-artwork.png", { type: "image/png" })] }).catch(function() {});
         }
       });
     }
@@ -926,10 +1159,13 @@ function ResonanceSpace({ user, pair, onDissolve }) {
 
   // ── Derived values ──
   var dNorm = 1, trRgb = "255,255,255";
-  if (touch && trace) dNorm = dst(touch.x, touch.y, trace.reveal_position.x, trace.reveal_position.y) / Math.sqrt(2);
+  if (touch && trace) {
+    var ep = effectiveRevealPosR.current || trace.reveal_position;
+    dNorm = dst(touch.x, touch.y, ep.x, ep.y) / Math.sqrt(2);
+  }
   if (trace && TONES[trace.emotional_tone]) trRgb = TONES[trace.emotional_tone].rgb.join(",");
-  var pxL = dNorm < 0.03 ? "hold gently\u2026" : dNorm < 0.10 ? "right here\u2026" : dNorm < 0.25 ? "getting warmer\u2026" : dNorm < 0.50 ? "something faint\u2026" : null;
-  var pxA = dNorm < 0.03 ? 0.8 : dNorm < 0.10 ? 0.6 : dNorm < 0.25 ? 0.4 : dNorm < 0.50 ? 0.22 : 0;
+  var pxL = dNorm < 0.04 ? "hold gently\u2026" : dNorm < 0.14 ? "right here\u2026" : dNorm < 0.30 ? "getting warmer\u2026" : dNorm < 0.55 ? "something faint\u2026" : null;
+  var pxA = dNorm < 0.04 ? 0.8 : dNorm < 0.14 ? 0.6 : dNorm < 0.30 ? 0.4 : dNorm < 0.55 ? 0.22 : 0;
   var mRgb = mTone && TONES[mTone] ? TONES[mTone].rgb.join(",") : "255,255,255";
   var bottomColor = lastTone ? TONES[lastTone].primary : "rgba(255,255,255,0.2)";
 
@@ -1069,7 +1305,7 @@ function ResonanceSpace({ user, pair, onDissolve }) {
       </div> : null}
 
       {/* Proximity label */}
-      {phase === "discovery" && pxL && touch ? <div style={{ position:"absolute",left:(touch.x*100)+"%",top:Math.max(4,touch.y*100-5)+"%",transform:"translate(-50%,-100%)",zIndex:12,pointerEvents:"none",fontFamily:FONT,color:"rgba("+trRgb+","+pxA+")",fontSize:12,letterSpacing:"0.12em",fontWeight:200,fontStyle:"italic",textShadow:dNorm<0.1?"0 0 15px rgba("+trRgb+",0.3)":"none",transition:"color 0.3s" }}>{pxL}</div> : null}
+      {phase === "discovery" && pxL && touch ? <div style={{ position:"absolute",left:(touch.x*100)+"%",top:touch.y < 0.25 ? Math.min(96, touch.y*100+18)+"%" : Math.max(4, touch.y*100-18)+"%",transform:"translate(-50%,"+(touch.y < 0.25 ? "0" : "-100%")+")",zIndex:12,pointerEvents:"none",fontFamily:FONT,color:"rgba("+trRgb+","+pxA+")",fontSize:12,letterSpacing:"0.12em",fontWeight:200,fontStyle:"italic",textShadow:dNorm<0.1?"0 0 15px rgba("+trRgb+",0.3)":"none",transition:"color 0.3s, top 0.15s" }}>{pxL}</div> : null}
 
       {/* Onboarding hints */}
       {phase === "discovery" && onbStep <= 1 ? <div style={{ position:"absolute",bottom:70,left:0,right:0,textAlign:"center",zIndex:10,pointerEvents:"none",fontFamily:FONT,animation:"fadeIn 2s ease" }}>
@@ -1098,10 +1334,39 @@ function ResonanceSpace({ user, pair, onDissolve }) {
       {mPhase === "whisperShow" && whisper ? <WhisperDisplayUI word={whisper} rgb={mRgb} onDone={onWhisperDone} /> : null}
       {mPhase === "echo" ? <EchoMarkPickerUI rgb={mRgb} onSelect={onEchoSelect} onTimeout={onEchoTimeout} /> : null}
       {mPhase === "echoShow" && echoM ? <EchoMarkDisplayUI mark={echoM} rgb={mRgb} onDone={onEchoDone} /> : null}
-      {mPhase === "pulse" ? <PulseCaptureUI tone={mTone} rgb={mRgb} onCapture={onPulseCapture} /> : null}
+      {/* Note: PulseCaptureUI removed — amplified reveal is now automatic */}
 
       {/* Incoming partner moment display */}
       {incomingMoment ? <IncomingMomentDisplay event={incomingMoment} pair={pair} onDismiss={dismissIncoming} /> : null}
+
+      {/* Milestone display */}
+      {milestone ? <div style={{ position:"absolute",top:"42%",left:0,right:0,textAlign:"center",zIndex:16,pointerEvents:"none",fontFamily:FONT,animation:"fadeIn 1.5s ease" }}>
+        <div style={{ color:"rgba(212,165,116,0.4)",fontSize:11,letterSpacing:"0.2em",fontWeight:200 }}>{milestone}</div>
+      </div> : null}
+
+      {/* Still-here incoming from partner */}
+      {stillHereIncoming ? <div style={{ position:"absolute",top:"40%",left:0,right:0,textAlign:"center",zIndex:16,pointerEvents:"none",fontFamily:FONT,animation:"fadeIn 0.8s ease" }}>
+        <div style={{ width:8,height:8,borderRadius:"50%",background:"rgba(212,165,116,0.5)",boxShadow:"0 0 40px rgba(212,165,116,0.3)",margin:"0 auto 14px",animation:"gentlePulse 2s ease infinite" }} />
+        <div style={{ color:"rgba(212,165,116,0.45)",fontSize:10,letterSpacing:"0.2em",fontWeight:200 }}>your person is here</div>
+      </div> : null}
+
+      {/* Nudge incoming from partner */}
+      {nudgeIncoming ? <div style={{ position:"absolute",top:"38%",left:0,right:0,textAlign:"center",zIndex:16,pointerEvents:"none",fontFamily:FONT,animation:"fadeIn 0.8s ease" }}>
+        <div style={{ width:6,height:6,borderRadius:"50%",background:"rgba(255,255,255,0.4)",boxShadow:"0 0 30px rgba(255,255,255,0.2)",margin:"0 auto 14px",animation:"gentlePulse 2s ease infinite" }} />
+        <div style={{ color:"rgba(255,255,255,0.45)",fontSize:10,letterSpacing:"0.2em",fontWeight:200 }}>your person is waiting</div>
+      </div> : null}
+
+      {/* Nudge confirmation overlay */}
+      {nudgeConfirm ? <div style={{ position:"absolute",inset:0,zIndex:52,display:"flex",alignItems:"center",justifyContent:"center",pointerEvents:"none" }}>
+        <div style={{ pointerEvents:"auto",maxWidth:300,padding:"24px 28px",borderRadius:20,background:"rgba(17,17,24,0.95)",border:"1px solid rgba(255,255,255,0.08)",fontFamily:FONT,textAlign:"center",animation:"fadeIn 0.5s ease",backdropFilter:"blur(12px)",WebkitBackdropFilter:"blur(12px)" }}>
+          <div style={{ color:"rgba(255,255,255,0.45)",fontSize:10,letterSpacing:"0.2em",fontWeight:200,marginBottom:12 }}>GENTLE REMINDER</div>
+          <div style={{ color:"rgba(255,255,255,0.5)",fontSize:11,fontWeight:200,lineHeight:1.7,marginBottom:20 }}>your person will be notified<br/>that you are waiting</div>
+          <div style={{ display:"flex",gap:12,justifyContent:"center" }}>
+            <div onClick={function() { setNudgeConfirm(false); }} style={{ padding:"10px 20px",borderRadius:20,border:"1px solid rgba(255,255,255,0.06)",cursor:"pointer",color:"rgba(255,255,255,0.5)",fontSize:10,fontWeight:200 }}>CANCEL</div>
+            <div onClick={doSendNudge} style={{ padding:"10px 20px",borderRadius:20,border:"1px solid rgba(212,165,116,0.2)",background:"rgba(212,165,116,0.06)",cursor:"pointer",color:"rgba(212,165,116,0.7)",fontSize:10,fontWeight:300 }}>SEND</div>
+          </div>
+        </div>
+      </div> : null}
 
       {/* Proposal overlays */}
       {reunionUI === "propose" ? <ReunionPropose pair={pair} user={user} onDone={function(reu) { if (reu) setReunion(reu); setReunionUI(null); }} /> : null}
@@ -1165,8 +1430,30 @@ function ResonanceSpace({ user, pair, onDissolve }) {
             <div style={{ width:"58%",height:3,borderRadius:2,background:"linear-gradient(90deg, transparent, "+bottomColor+", transparent)",animation:"breathe 5s ease-in-out infinite" }} /></div>
           : phase === "idle" && sentTone ? <div style={{ display:"flex",flexDirection:"column",alignItems:"center",paddingBottom:20,gap:6 }}>
             <div style={{ width:7,height:7,borderRadius:"50%",background:TONES[sentTone]?TONES[sentTone].primary:"#555",boxShadow:"0 0 16px "+(TONES[sentTone]?TONES[sentTone].primary:"#555")+"77",animation:"gentlePulse 3s ease-in-out infinite" }} />
-            <span style={{ color:(TONES[sentTone]?TONES[sentTone].primary:"#888")+"BB",fontSize:9,letterSpacing:"0.16em",fontWeight:200 }}>YOUR TRACE IS OUT THERE</span></div>
+            <span style={{ color:(TONES[sentTone]?TONES[sentTone].primary:"#888")+"BB",fontSize:9,letterSpacing:"0.16em",fontWeight:200 }}>YOUR TRACE IS OUT THERE</span>
+            {nudgeReady && !nudgeSent ? <div onClick={function() { setNudgeConfirm(true); }} style={{ marginTop:8,cursor:"pointer",padding:"8px 20px",borderRadius:16,border:"1px solid rgba(255,255,255,0.06)",background:"rgba(255,255,255,0.02)",animation:"fadeIn 1s ease" }}>
+              <span style={{ color:"rgba(255,255,255,0.35)",fontSize:9,letterSpacing:"0.12em",fontWeight:200 }}>send a gentle reminder</span>
+            </div> : null}
+            {nudgeSent ? <div style={{ marginTop:8,animation:"fadeIn 0.5s ease" }}>
+              <span style={{ color:"rgba(212,165,116,0.4)",fontSize:9,letterSpacing:"0.12em",fontWeight:200 }}>reminder sent</span>
+            </div> : null}
+          </div>
+          : phase === "idle" && !canSend && contribs.length > 0 ? null
           : null}
+          {/* Still-here hold area — idle with nothing to send */}
+          {phase === "idle" && !canSend && !sentTone && stillHereReady && contribs.length > 0 ? <div style={{ display:"flex",flexDirection:"column",alignItems:"center",paddingBottom:20,gap:6,animation:"fadeIn 2s ease" }}>
+            <div onPointerDown={startStillHereHold} onPointerUp={stopStillHereHold} onPointerLeave={stopStillHereHold}
+              style={{ width:40,height:40,borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",position:"relative" }}>
+              {stillHereHold > 0 ? <svg width="40" height="40" style={{ position:"absolute",transform:"rotate(-90deg)" }}>
+                <circle cx="20" cy="20" r="17" fill="none" stroke="rgba(212,165,116,0.3)" strokeWidth="2" strokeDasharray={Math.PI*34} strokeDashoffset={Math.PI*34*(1-stillHereHold)} strokeLinecap="round" />
+              </svg> : null}
+              <div style={{ width:6,height:6,borderRadius:"50%",background:"rgba(212,165,116,"+(0.2+stillHereHold*0.4)+")",boxShadow:"0 0 "+(8+stillHereHold*20)+"px rgba(212,165,116,"+(0.1+stillHereHold*0.3)+")" }} />
+            </div>
+            <span style={{ color:"rgba(255,255,255,0.25)",fontSize:8,letterSpacing:"0.12em",fontWeight:200 }}>hold to send your presence</span>
+          </div> : null}
+          {stillHereSent ? <div style={{ display:"flex",flexDirection:"column",alignItems:"center",paddingBottom:20,gap:6,animation:"fadeIn 0.5s ease" }}>
+            <span style={{ color:"rgba(212,165,116,0.4)",fontSize:9,letterSpacing:"0.12em",fontWeight:200 }}>presence sent</span>
+          </div> : null}
         </div>) : null}
     </div>
   );
@@ -1184,7 +1471,7 @@ function IncomingMomentDisplay({ event, pair, onDismiss }) {
 
   useEffect(function() {
     var s = Date.now();
-    var dur = extra.whisper_word ? 8000 : extra.echo_mark ? 10000 : 6000;
+    var dur = extra.whisper_word ? 8000 : extra.echo_mark ? 10000 : extra.amplified ? 10000 : 6000;
     var iv = setInterval(function() {
       var pr = (Date.now()-s)/dur;
       if (pr >= 1) { clearInterval(iv); onDismiss(); }
@@ -1209,9 +1496,10 @@ function IncomingMomentDisplay({ event, pair, onDismiss }) {
     </div>;
   }
 
-  // Pulse gesture — subtle indicator
-  return <div style={{ position:"absolute",top:22,left:0,right:0,textAlign:"center",zIndex:38,pointerEvents:"none",fontFamily:FONT }}>
-    <span style={{ color:"rgba("+rgb+","+(al*0.4)+")",fontSize:10,letterSpacing:"0.2em",fontWeight:200 }}>something resonated</span>
+  // Amplified reveal — deeper resonance indicator
+  return <div style={{ position:"absolute",top:"38%",left:0,right:0,textAlign:"center",zIndex:38,pointerEvents:"none",fontFamily:FONT }}>
+    <div style={{ width:6,height:6,borderRadius:"50%",background:"rgba("+rgb+","+(al*0.5)+")",boxShadow:"0 0 30px rgba("+rgb+","+(al*0.25)+")",margin:"0 auto 12px" }} />
+    <span style={{ color:"rgba("+rgb+","+(al*0.45)+")",fontSize:10,letterSpacing:"0.2em",fontWeight:200 }}>this trace resonated deeply</span>
   </div>;
 }
 
@@ -1228,7 +1516,7 @@ function InstallPrompt() {
     var isStandalone = window.matchMedia("(display-mode: standalone)").matches
       || window.navigator.standalone === true;
     if (isStandalone) return;
-    try { if (sessionStorage.getItem("resonance_install_dismissed")) return; } catch(e) {}
+    try { if (sessionStorage.getItem("resona_install_dismissed")) return; } catch(e) {}
 
     // Android: capture native install prompt
     var handler = function(e) { e.preventDefault(); setDeferredPrompt(e); };
@@ -1240,7 +1528,7 @@ function InstallPrompt() {
 
   var dismiss = useCallback(function() {
     setShow(false);
-    try { sessionStorage.setItem("resonance_install_dismissed", "1"); } catch(e) {}
+    try { sessionStorage.setItem("resona_install_dismissed", "1"); } catch(e) {}
   }, []);
 
   var install = useCallback(function() {
@@ -1257,7 +1545,7 @@ function InstallPrompt() {
 
   return <div style={{ position:"absolute",inset:0,zIndex:56,display:"flex",alignItems:"center",justifyContent:"center",pointerEvents:"none" }}>
     <div style={{ pointerEvents:"auto",maxWidth:300,padding:"24px 28px",borderRadius:20,background:"rgba(17,17,24,0.95)",border:"1px solid rgba(255,255,255,0.08)",fontFamily:FONT,textAlign:"center",animation:"fadeIn 0.8s ease",backdropFilter:"blur(12px)",WebkitBackdropFilter:"blur(12px)" }}>
-      <div style={{ color:"rgba(255,255,255,0.45)",fontSize:11,letterSpacing:"0.15em",fontWeight:300,marginBottom:10 }}>Install Resonance</div>
+      <div style={{ color:"rgba(255,255,255,0.45)",fontSize:11,letterSpacing:"0.15em",fontWeight:300,marginBottom:10 }}>Install Resona</div>
       {canNativeInstall ? (
         <div>
           <div style={{ color:"rgba(255,255,255,0.5)",fontSize:10,fontWeight:200,marginBottom:18 }}>add to your home screen for the best experience</div>
@@ -1424,7 +1712,7 @@ function GlimpseCanvas({ contribs, onDone }) {
       var vr = Math.min(w,h)*baseR*a;
       if(vr<2){if(pr>=1)setTimeout(onDone,200);else af=requestAnimationFrame(draw);return;}
       ctx.save();ctx.beginPath();ctx.arc(cx,cy,vr,0,Math.PI*2);ctx.clip();
-      contribs.forEach(function(ct){if(!ct.path||ct.path.length<2)return;drawGesturePath(ctx,ct.path,ct.tone,w,h,a*0.6,8);});
+      drawArtwork(ctx, contribs, w, h, a * 0.7);
       ctx.globalAlpha=1;ctx.globalCompositeOperation="source-over";ctx.restore();
       var eg=ctx.createRadialGradient(cx,cy,vr*0.6,cx,cy,vr*1.12);eg.addColorStop(0,"transparent");eg.addColorStop(1,"rgba(6,6,12,"+a+")");ctx.fillStyle=eg;ctx.fillRect(0,0,w,h);
       ctx.fillStyle="rgba(255,255,255,"+(0.18*a)+")";ctx.font="200 10px "+FONT;ctx.textAlign="center";ctx.fillText(gt,cx,cy+vr+26);
@@ -1440,7 +1728,24 @@ function TraceCreationUI({ onSend, onCancel, guided }) {
   var _b = useState([]), path = _b[0], setPath = _b[1];
   var _c = useState(false), dr = _c[0], setDr = _c[1];
   var _d = useState(false), sent = _d[0], setSent = _d[1];
+  var _pv = useState(null), previewTone = _pv[0], setPreviewTone = _pv[1];
+  var _pvA = useState(0), previewAlpha = _pvA[0], setPreviewAlpha = _pvA[1];
   var cv = useRef(null), pr = useRef([]);
+
+  // Tone preview: flash background, play sound, then set tone
+  var selectTone = useCallback(function(k) {
+    setPreviewTone(k);
+    soundTonePreview(k);
+    hapticLight();
+    setPreviewAlpha(1);
+    // Fade background flash
+    var start = Date.now();
+    var iv = setInterval(function() {
+      var elapsed = Date.now() - start;
+      if (elapsed > 600) { clearInterval(iv); setPreviewAlpha(0); setTone(k); setPreviewTone(null); return; }
+      setPreviewAlpha(1 - elapsed / 600);
+    }, 20);
+  }, []);
 
   var oD = useCallback(function(ev) { if (!tone || sent) return; var r = ev.currentTarget.getBoundingClientRect(); pr.current = [{ x:(ev.clientX-r.left)/r.width, y:(ev.clientY-r.top)/r.height, t:Date.now() }]; setPath(pr.current.slice()); setDr(true); }, [tone, sent]);
   var oM = useCallback(function(ev) { if (!dr) return; var r = ev.currentTarget.getBoundingClientRect(); pr.current.push({ x:(ev.clientX-r.left)/r.width, y:(ev.clientY-r.top)/r.height, t:Date.now() }); setPath(pr.current.slice()); }, [dr]);
@@ -1456,14 +1761,20 @@ function TraceCreationUI({ onSend, onCancel, guided }) {
 
   if (sent) { var sc2 = TONES[tone]?TONES[tone].primary:"#888"; return <div style={{ position:"absolute",inset:0,zIndex:20,background:"rgba(6,6,12,0.97)",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",fontFamily:FONT }}><div style={{ width:40,height:40,borderRadius:"50%",background:sc2,opacity:0.6,boxShadow:"0 0 40px "+sc2+"88",animation:"sendPulse 1.5s ease infinite" }} /><p style={{ color:"rgba(255,255,255,0.6)",fontSize:12,letterSpacing:"0.2em",fontWeight:200,marginTop:20 }}>TRACE SENT</p></div>; }
 
-  if (!tone) { return <div style={{ position:"absolute",inset:0,zIndex:20,background:"rgba(6,6,12,0.97)",display:"flex",flexDirection:"column",fontFamily:FONT }}>
+  if (!tone) {
+    var pvRgb = previewTone && TONES[previewTone] ? TONES[previewTone].rgb : null;
+    return <div style={{ position:"absolute",inset:0,zIndex:20,background:"rgba(6,6,12,0.97)",display:"flex",flexDirection:"column",fontFamily:FONT }}>
+    {/* Tone preview background flash */}
+    {pvRgb && previewAlpha > 0 ? <div style={{ position:"absolute",inset:0,background:"rgba("+pvRgb[0]+","+pvRgb[1]+","+pvRgb[2]+","+(previewAlpha*0.08)+")",pointerEvents:"none",zIndex:0,transition:"background 0.1s" }} /> : null}
     <button onClick={onCancel} style={{ position:"absolute",top:14,right:14,zIndex:25,background:"none",border:"none",color:"rgba(255,255,255,0.5)",fontSize:20,cursor:"pointer",padding:10 }}>{"\u2715"}</button>
-    <div style={{ flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:36 }}>
+    <div style={{ flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:36,position:"relative",zIndex:1 }}>
       {guided ? <p style={{ color:"rgba(255,255,255,0.55)",fontSize:12,fontWeight:200,letterSpacing:"0.15em",lineHeight:1.8,textAlign:"center" }}>choose how your trace<br/>should feel</p> : null}
       <p style={{ color:"rgba(255,255,255,0.45)",fontSize:10,letterSpacing:"0.3em",fontWeight:200 }}>EMOTIONAL TONE</p>
       <div style={{ display:"flex",gap:24,flexWrap:"wrap",justifyContent:"center" }}>
-        {TONE_KEYS.map(function(k) { return <div key={k} onClick={function() { setTone(k); }} style={{ display:"flex",flexDirection:"column",alignItems:"center",gap:10,cursor:"pointer" }}>
-          <div style={{ width:50,height:50,borderRadius:"50%",background:"radial-gradient(circle at 36% 36%, "+TONES[k].colors[0]+", "+TONES[k].colors[1]+")",border:"1.5px solid rgba(255,255,255,0.06)",boxShadow:"0 0 28px "+TONES[k].primary+"55",transition:"transform 0.3s, box-shadow 0.3s" }} />
+        {TONE_KEYS.map(function(k) {
+          var isPreview = previewTone === k;
+          return <div key={k} onClick={function() { if (!previewTone) selectTone(k); }} style={{ display:"flex",flexDirection:"column",alignItems:"center",gap:10,cursor:previewTone?"default":"pointer",transition:"transform 0.3s, opacity 0.3s",transform:isPreview?"scale(1.15)":"scale(1)",opacity:previewTone&&!isPreview?0.3:1 }}>
+          <div style={{ width:50,height:50,borderRadius:"50%",background:"radial-gradient(circle at 36% 36%, "+TONES[k].colors[0]+", "+TONES[k].colors[1]+")",border:"1.5px solid rgba(255,255,255,0.06)",boxShadow:isPreview?"0 0 40px "+TONES[k].primary+"88":"0 0 28px "+TONES[k].primary+"55",transition:"transform 0.3s, box-shadow 0.3s" }} />
           <span style={{ color:TONES[k].primary,fontSize:9,letterSpacing:"0.1em",opacity:0.6,fontWeight:300 }}>{TONES[k].name}</span></div>; })}
       </div></div></div>; }
 
@@ -1570,10 +1881,7 @@ function ReunionReveal({ contribs, reunion, onDone }) {
       if (vr > 2) {
         ctx.save();
         ctx.beginPath(); ctx.arc(cx, cy, vr, 0, Math.PI * 2); ctx.clip();
-        contribs.forEach(function(ct) {
-          if (!ct.path || ct.path.length < 2) return;
-          drawGesturePath(ctx, ct.path, ct.tone, w, h, a * 0.8, 10);
-        });
+        drawArtwork(ctx, contribs, w, h, a * 0.85);
         ctx.globalAlpha = 1; ctx.globalCompositeOperation = "source-over";
         ctx.restore();
 
@@ -1690,6 +1998,82 @@ function EmailLinkUI({ onDone }) {
         We sent a confirmation link to <strong style={{ color:"rgba(255,255,255,0.6)" }}>{email}</strong>. Click it to secure your account.
       </div>
       <div onClick={onDone} style={{ marginTop:10,padding:"12px 32px",borderRadius:20,border:"1px solid rgba(255,255,255,0.08)",cursor:"pointer",color:"rgba(255,255,255,0.45)",fontSize:10,fontWeight:200 }}>DONE</div>
+    </div> : null}
+  </div>;
+}
+
+
+// ══════════════════════════════════════
+// SIGN IN — Return user with existing email account
+// ══════════════════════════════════════
+function SignInUI({ onDone, onBack }) {
+  var _e = useState(""), email = _e[0], setEmail = _e[1];
+  var _s = useState("input"), step = _s[0], setStep = _s[1]; // input | sending | sent | error
+  var _err = useState(null), err = _err[0], setErr = _err[1];
+  var _checking = useState(false), checking = _checking[0], setChecking = _checking[1];
+
+  var submit = async function() {
+    if (!email || !email.includes("@")) return;
+    setStep("sending"); setErr(null);
+    try {
+      await signInWithEmail(email);
+      setStep("sent");
+    } catch (e) {
+      setErr(e.message || "Failed to send sign-in link");
+      setStep("error");
+    }
+  };
+
+  // Listen for auth state change (user clicked magic link and came back)
+  useEffect(function() {
+    var sub = supabase.auth.onAuthStateChange(function(event, session) {
+      if (event === 'SIGNED_IN' && session && !session.user.is_anonymous) {
+        setChecking(true);
+        onDone();
+      }
+    });
+    return function() { sub.data.subscription.unsubscribe(); };
+  }, [onDone]);
+
+  if (checking) {
+    return <div style={{ position:"absolute",inset:0,zIndex:50,background:"#0A0A12",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",fontFamily:FONT }}>
+      <div style={{ width:6,height:6,borderRadius:"50%",background:"rgba(212,165,116,0.4)",animation:"gentlePulse 1.5s ease infinite" }} />
+      <div style={{ marginTop:20,color:"rgba(255,255,255,0.45)",fontSize:10,letterSpacing:"0.2em",fontWeight:200 }}>SIGNING IN…</div>
+    </div>;
+  }
+
+  return <div style={{ position:"absolute",inset:0,zIndex:50,background:"#0A0A12",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",fontFamily:FONT }}>
+
+    {step === "input" || step === "error" ? <div style={{ display:"flex",flexDirection:"column",alignItems:"center",gap:20,maxWidth:320 }}>
+      <div style={{ width:2,height:2,borderRadius:"50%",background:"rgba(212,165,116,0.5)",marginBottom:10 }} />
+      <div style={{ color:"rgba(255,255,255,0.5)",fontSize:9,letterSpacing:"0.3em",fontWeight:200 }}>WELCOME BACK</div>
+      <div style={{ color:"rgba(255,255,255,0.45)",fontSize:11,fontWeight:200,lineHeight:1.7,textAlign:"center" }}>
+        Enter the email you used to secure<br/>your account. We'll send a sign-in link.
+      </div>
+      {err ? <div style={{ color:"rgba(196,30,58,0.6)",fontSize:10,fontWeight:200 }}>{err}</div> : null}
+      <input type="email" value={email} onChange={function(ev) { setEmail(ev.target.value); }} placeholder="your@email.com"
+        style={{ fontSize:14,fontWeight:200,color:"rgba(255,255,255,0.6)",padding:"14px 20px",borderRadius:12,background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.1)",outline:"none",fontFamily:FONT,width:"100%",textAlign:"center" }} />
+      <div onClick={submit} style={{ padding:"14px 44px",borderRadius:24,border:"1px solid rgba(212,165,116,0.2)",background:email.includes("@")?"rgba(212,165,116,0.06)":"transparent",cursor:email.includes("@")?"pointer":"default",color:email.includes("@")?"rgba(212,165,116,0.7)":"rgba(255,255,255,0.2)",fontSize:11,letterSpacing:"0.15em",fontWeight:300 }}>SEND SIGN-IN LINK</div>
+      <div onClick={onBack} style={{ cursor:"pointer",padding:"8px 16px",marginTop:4 }}>
+        <span style={{ color:"rgba(255,255,255,0.25)",fontSize:10,letterSpacing:"0.1em",fontWeight:200 }}>back</span>
+      </div>
+    </div> : null}
+
+    {step === "sending" ? <div style={{ display:"flex",flexDirection:"column",alignItems:"center",gap:16 }}>
+      <div style={{ width:6,height:6,borderRadius:"50%",background:"rgba(212,165,116,0.4)",animation:"gentlePulse 1.5s ease infinite" }} />
+      <div style={{ color:"rgba(255,255,255,0.45)",fontSize:10,fontWeight:200 }}>sending…</div>
+    </div> : null}
+
+    {step === "sent" ? <div style={{ display:"flex",flexDirection:"column",alignItems:"center",gap:16,maxWidth:300 }}>
+      <div style={{ width:6,height:6,borderRadius:"50%",background:"rgba(100,200,100,0.5)" }} />
+      <div style={{ color:"rgba(255,255,255,0.5)",fontSize:10,letterSpacing:"0.2em",fontWeight:200 }}>CHECK YOUR EMAIL</div>
+      <div style={{ color:"rgba(255,255,255,0.4)",fontSize:11,fontWeight:200,lineHeight:1.7,textAlign:"center" }}>
+        We sent a sign-in link to <strong style={{ color:"rgba(255,255,255,0.6)" }}>{email}</strong>.<br/>Click it to sign in.
+      </div>
+      <div style={{ color:"rgba(255,255,255,0.3)",fontSize:9,fontWeight:200,lineHeight:1.6,textAlign:"center",marginTop:8 }}>
+        After clicking the link, this page<br/>will automatically continue.
+      </div>
+      <div onClick={onBack} style={{ marginTop:16,padding:"12px 32px",borderRadius:20,border:"1px solid rgba(255,255,255,0.08)",cursor:"pointer",color:"rgba(255,255,255,0.45)",fontSize:10,fontWeight:200 }}>BACK</div>
     </div> : null}
   </div>;
 }

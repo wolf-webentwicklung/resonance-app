@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════
-// Sound Design — Web Audio API
+// Resona — Sound Design — Web Audio API
 // Minimal, warm, atmospheric. Only at meaningful moments.
 // ══════════════════════════════════════════
 
@@ -62,6 +62,48 @@ export function soundArtworkReveal() {
   note(131, 2.5, 0.10, 'sine');
   setTimeout(function() { note(196, 2.0, 0.08, 'sine'); }, 800);
   setTimeout(function() { note(262, 2.5, 0.07, 'triangle'); }, 1600);
+}
+
+// ── Still-here presence: single soft tone ──
+export function soundStillHere() {
+  note(330, 0.8, 0.05, 'sine');
+}
+
+// ── Nudge sent: gentle double tap ──
+export function soundNudge() {
+  note(350, 0.25, 0.04, 'sine');
+  setTimeout(function() { note(420, 0.3, 0.04, 'sine'); }, 180);
+}
+
+// ── Tone preview sounds: short characteristic preview per tone ──
+export function soundTonePreview(toneName) {
+  var c = getCtx(); if (!c) return;
+  if (toneName === 'nearness') {
+    // Warm low tone
+    note(220, 0.35, 0.06, 'sine');
+  } else if (toneName === 'longing') {
+    // Mid tone with slight detune sweep
+    var osc = c.createOscillator();
+    var gain = c.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(350, c.currentTime);
+    osc.frequency.linearRampToValueAtTime(320, c.currentTime + 0.4);
+    gain.gain.setValueAtTime(0, c.currentTime);
+    gain.gain.linearRampToValueAtTime(0.06, c.currentTime + 0.06);
+    gain.gain.exponentialRampToValueAtTime(0.0001, c.currentTime + 0.5);
+    osc.connect(gain); gain.connect(c.destination);
+    osc.start(c.currentTime); osc.stop(c.currentTime + 0.6);
+  } else if (toneName === 'tension') {
+    // Short sharp tone
+    note(520, 0.15, 0.05, 'sawtooth');
+  } else if (toneName === 'warmth') {
+    // Round triangle tone
+    note(280, 0.4, 0.06, 'triangle');
+  } else if (toneName === 'playfulness') {
+    // Two quick ascending notes
+    note(440, 0.15, 0.05, 'sine');
+    setTimeout(function() { note(660, 0.2, 0.05, 'sine'); }, 100);
+  }
 }
 
 export function initAudio() { getCtx(); }

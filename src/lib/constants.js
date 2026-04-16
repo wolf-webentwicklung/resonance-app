@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════
-// Shared constants and utilities
+// Resona — Shared constants and utilities
 // ══════════════════════════════════════════
 
 export var TONES = {
@@ -62,7 +62,11 @@ export function pickN(arr, n) {
 
 // ── Cooldown constants ──
 // Minimum hours between resonance moments for the same pair
-export var MOMENT_COOLDOWN_HOURS = 8;
+export var MOMENT_COOLDOWN_HOURS = 5;
+// Minimum hours between still-here gestures
+export var STILL_HERE_COOLDOWN_HOURS = 4;
+// Hours before nudge becomes available
+export var NUDGE_DELAY_HOURS = 2;
 // Priority order (higher = rarer, more important)
 export var MOMENT_PRIORITY = {
   twin_connection: 3,
@@ -134,4 +138,125 @@ export function drawGesturePath(ctx, path, tone, w, h, alpha, glowWidth) {
   ctx.stroke();
   ctx.globalAlpha = 1;
   ctx.globalCompositeOperation = "source-over";
+}
+
+// ── Epoch progression ──
+export var EPOCH_THRESHOLDS = [
+  { traces: 0,   hueShift: 0,    satBoost: 0 },
+  { traces: 10,  hueShift: 0.02, satBoost: 0.01 },
+  { traces: 25,  hueShift: 0.05, satBoost: 0.02 },
+  { traces: 50,  hueShift: 0.09, satBoost: 0.03 },
+  { traces: 100, hueShift: 0.14, satBoost: 0.04 },
+];
+
+export var MILESTONES = [
+  { traces: 1,   text: "the first mark" },
+  { traces: 10,  text: "ten traces between you" },
+  { traces: 25,  text: "something is growing" },
+  { traces: 50,  text: "half a hundred moments" },
+  { traces: 100, text: "a hundred traces deep" },
+];
+
+// ── Tone-based discovery parameters (radii sized for finger touch) ──
+export var TONE_DISCOVERY = {
+  nearness:    { baseRadius: 0.15, preferSignal: "drift" },
+  warmth:      { baseRadius: 0.13, preferSignal: null },
+  playfulness: { baseRadius: 0.12, preferSignal: "shimmer", driftSpeed: 0.15 },
+  longing:     { baseRadius: 0.10, preferSignal: "pulse" },
+  tension:     { baseRadius: 0.08, preferSignal: "flicker" },
+};
+
+// ── Residue echo config ──
+export var RESIDUE_CONFIG = [
+  { maxAge: 1800000, baseAlpha: 0.06 },   // newest: 30 min
+  { maxAge: 3600000, baseAlpha: 0.04 },   // second: 60 min
+  { maxAge: 7200000, baseAlpha: 0.025 },  // third: 120 min
+];
+export var MAX_ECHOES = 3;
+
+// ── Epoch interpolation helper ──
+export function getEpochShift(traceCount) {
+  var th = EPOCH_THRESHOLDS;
+  for (var i = th.length - 1; i >= 0; i--) {
+    if (traceCount >= th[i].traces) {
+      if (i === th.length - 1) return { hueShift: th[i].hueShift, satBoost: th[i].satBoost };
+      var next = th[i + 1];
+      var progress = (traceCount - th[i].traces) / (next.traces - th[i].traces);
+      return {
+        hueShift: lerp(th[i].hueShift, next.hueShift, progress),
+        satBoost: lerp(th[i].satBoost, next.satBoost, progress),
+      };
+    }
+  }
+  return { hueShift: 0, satBoost: 0 };
+}
+
+// ── Enhanced artwork rendering ──
+export function drawArtwork(ctx, contribs, w, h, alpha) {
+  if (!contribs || contribs.length === 0) return;
+  var total = contribs.length;
+
+  // 1. Subtle noise background tinted by average tone color
+  var avgR = 0, avgG = 0, avgB = 0, toneCount = 0;
+  contribs.forEach(function(ct) {
+    var tn = TONES[ct.tone];
+    if (tn) { avgR += tn.rgb[0]; avgG += tn.rgb[1]; avgB += tn.rgb[2]; toneCount++; }
+  });
+  if (toneCount > 0) { avgR /= toneCount; avgG /= toneCount; avgB /= toneCount; }
+  // Paint a very subtle color wash
+  var washAlpha = Math.min(0.04, 0.02 + total * 0.001) * alpha;
+  ctx.globalAlpha = washAlpha;
+  ctx.globalCompositeOperation = "screen";
+  var cx = w / 2, cy = h / 2, maxDim = Math.max(w, h);
+  var wash = ctx.createRadialGradient(cx, cy, 0, cx, cy, maxDim * 0.6);
+  wash.addColorStop(0, "rgb(" + Math.round(avgR) + "," + Math.round(avgG) + "," + Math.round(avgB) + ")");
+  wash.addColorStop(1, "transparent");
+  ctx.fillStyle = wash;
+  ctx.fillRect(0, 0, w, h);
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = "source-over";
+
+  // 2. Draw traces with temporal layering and composition offset
+  contribs.forEach(function(ct, i) {
+    if (!ct.path || ct.path.length < 2) return;
+    var tn = TONES[ct.tone];
+    if (!tn) return;
+
+    // Temporal layering: older = more diffuse, lower opacity; newer = sharper
+    var age = i / Math.max(1, total - 1); // 0 = oldest, 1 = newest
+    var layerAlpha = (0.25 + age * 0.5) * alpha;
+    var glowW = 16 - age * 10; // older = wider glow, newer = tighter
+
+    // Composition offset: slight rotation and translation per trace
+    var offX = Math.sin(i * 1.7) * 0.025;
+    var offY = Math.cos(i * 2.3) * 0.025;
+    var rot = Math.sin(i * 0.8) * 0.04;
+
+    ctx.save();
+    ctx.translate(w / 2, h / 2);
+    ctx.rotate(rot);
+    ctx.translate(-w / 2 + offX * w, -h / 2 + offY * h);
+
+    // Outer glow
+    ctx.globalAlpha = Math.min(0.6, layerAlpha * 0.6);
+    ctx.globalCompositeOperation = "screen";
+    ctx.beginPath();
+    ctx.strokeStyle = tn.colors[1] + (glowW > 5 ? "44" : "22");
+    ctx.lineWidth = glowW;
+    ctx.lineCap = "round"; ctx.lineJoin = "round";
+    ct.path.forEach(function(pt, j) { j === 0 ? ctx.moveTo(pt.x * w, pt.y * h) : ctx.lineTo(pt.x * w, pt.y * h); });
+    ctx.stroke();
+
+    // Core line
+    ctx.beginPath();
+    ctx.strokeStyle = tn.colors[0];
+    ctx.globalAlpha = Math.min(0.7, layerAlpha);
+    ctx.lineWidth = Math.max(1, glowW / 4);
+    ct.path.forEach(function(pt, j) { j === 0 ? ctx.moveTo(pt.x * w, pt.y * h) : ctx.lineTo(pt.x * w, pt.y * h); });
+    ctx.stroke();
+
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = "source-over";
+    ctx.restore();
+  });
 }

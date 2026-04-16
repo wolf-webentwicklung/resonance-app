@@ -1,7 +1,7 @@
 import { createClient } from '@supabase/supabase-js';
 
 // ═══════════════════════════════════════════
-// SUPABASE CONFIG
+// RESONA — SUPABASE CONFIG
 // ═══════════════════════════════════════════
 const SUPABASE_URL = 'https://zcnzjndsbstpaowxglbp.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_8FYvT9wWpycrjfMKehomOg_yzEzy1lF';
@@ -84,13 +84,22 @@ export async function canSendTrace(userId) {
 
 // ── Traces: send a trace ──
 export async function sendTrace(pairId, senderId, receiverId, path, tone) {
-  const signals = ['shimmer','pulse','drift','flicker','density','wave'];
-  const sig = signals[Math.floor(Math.random() * signals.length)];
-  const pos = { x: 0.15 + Math.random() * 0.7, y: 0.15 + Math.random() * 0.55 };
-  const sr = 0.08 + (Math.random() - 0.5) * 0.06;
-  const passive = Math.random() < 0.2;
+  // Tone-based discovery parameters — radii sized for finger touch targets
+  var toneParams = {
+    nearness:    { baseRadius: 0.15, preferSignal: 'drift' },
+    warmth:      { baseRadius: 0.13, preferSignal: null },
+    playfulness: { baseRadius: 0.12, preferSignal: 'shimmer', driftSpeed: 0.15 },
+    longing:     { baseRadius: 0.10, preferSignal: 'pulse' },
+    tension:     { baseRadius: 0.08, preferSignal: 'flicker' },
+  };
+  var tp = toneParams[tone] || { baseRadius: 0.08, preferSignal: null };
+  var signals = ['shimmer','pulse','drift','flicker','density','wave'];
+  var sig = tp.preferSignal || signals[Math.floor(Math.random() * signals.length)];
+  var pos = { x: 0.15 + Math.random() * 0.7, y: 0.15 + Math.random() * 0.55 };
+  var sr = tp.baseRadius + (Math.random() - 0.5) * 0.04;
+  var passive = Math.random() < 0.2;
 
-  const { data, error } = await supabase.from('traces').insert({
+  var traceData = {
     pair_id: pairId,
     sender_id: senderId,
     receiver_id: receiverId,
@@ -100,7 +109,14 @@ export async function sendTrace(pairId, senderId, receiverId, path, tone) {
     reveal_position: pos,
     search_radius: sr,
     passive_reveal: passive,
-  }).select().single();
+  };
+
+  // Add drift speed for playfulness tone
+  if (tp.driftSpeed) {
+    traceData.reveal_position.drift_speed = tp.driftSpeed;
+  }
+
+  const { data, error } = await supabase.from('traces').insert(traceData).select().single();
 
   if (error) throw error;
 
@@ -208,6 +224,55 @@ export async function markEventSeen(eventId, userId, pair) {
 export async function dissolvePair() {
   const { error } = await supabase.rpc('dissolve_pair');
   if (error) throw error;
+}
+
+// ── Still Here: send presence gesture ──
+export async function sendStillHere(pairId, userId) {
+  return await createResonanceEvent(pairId, 'still_here', null, [], { sender_id: userId });
+}
+
+// ── Still Here: get last still_here event for cooldown ──
+export async function getLastStillHere(pairId) {
+  const { data } = await supabase
+    .from('resonance_events')
+    .select('*')
+    .eq('pair_id', pairId)
+    .eq('type', 'still_here')
+    .order('triggered_at', { ascending: false })
+    .limit(1)
+    .single();
+  return data;
+}
+
+// ── Nudge: send gentle reminder ──
+export async function sendNudge(pairId, userId) {
+  return await createResonanceEvent(pairId, 'nudge', null, [], { sender_id: userId });
+}
+
+// ── Nudge: get last nudge for this pair ──
+export async function getLastNudge(pairId) {
+  const { data } = await supabase
+    .from('resonance_events')
+    .select('*')
+    .eq('pair_id', pairId)
+    .eq('type', 'nudge')
+    .order('triggered_at', { ascending: false })
+    .limit(1)
+    .single();
+  return data;
+}
+
+// ── Get sent trace timestamp (for nudge timing) ──
+export async function getLastSentTrace(userId) {
+  const { data } = await supabase
+    .from('traces')
+    .select('id, created_at, discovered_at')
+    .eq('sender_id', userId)
+    .is('discovered_at', null)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .single();
+  return data;
 }
 
 // ── Realtime: subscribe to new traces for this user ──
