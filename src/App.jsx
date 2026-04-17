@@ -658,7 +658,7 @@ function ResonanceSpace({ user, pair, onDissolve }) {
         if (art.length > 0) {
           artContribs = art.filter(function(a) { return a.path_data && a.path_data.path; }).map(function(a) { return { tone: a.tone, path: a.path_data.path }; });
           setContribs(artContribs);
-          setRecTones(art.slice(-5).map(function(a) { return a.tone; }).reverse());
+          setRecTones(art.slice(-20).map(function(a) { return a.tone; }).reverse());
           setOnbStep(4);
         }
 
@@ -1037,10 +1037,18 @@ function ResonanceSpace({ user, pair, onDissolve }) {
       rr += pBlend * 12;
       rg += pBlend * 6;
       if (rt.length > 0) {
-        var t2 = 0, g2 = 0, b2 = 0;
-        rt.forEach(function(tn) { if (TONES[tn]) { t2 += TONES[tn].rgb[0]; g2 += TONES[tn].rgb[1]; b2 += TONES[tn].rgb[2]; } });
-        t2 /= rt.length; g2 /= rt.length; b2 /= rt.length;
-        rr = lerp(rr, t2, 0.07); rg = lerp(rg, g2, 0.07); rb = lerp(rb, b2, 0.07);
+        // Weighted blend: more recent traces carry more weight
+        var t2 = 0, g2 = 0, b2 = 0, wTotal = 0;
+        rt.forEach(function(tn, i) {
+          if (!TONES[tn]) return;
+          var w = 1 / (i + 1);
+          t2 += TONES[tn].rgb[0] * w; g2 += TONES[tn].rgb[1] * w; b2 += TONES[tn].rgb[2] * w;
+          wTotal += w;
+        });
+        if (wTotal > 0) { t2 /= wTotal; g2 /= wTotal; b2 /= wTotal; }
+        // Blend strength grows with relationship depth (more traces = stronger character)
+        var depthBlend = clamp(0.08 + (cb.length / 300), 0.08, 0.22);
+        rr = lerp(rr, t2, depthBlend); rg = lerp(rg, g2, depthBlend); rb = lerp(rb, b2, depthBlend);
       }
       var dT = 0, bB = 0;
       if (ph === "discovery" && tr && TONES[tr.emotional_tone]) {
@@ -1401,7 +1409,7 @@ function ResonanceSpace({ user, pair, onDissolve }) {
     setResEchoes(function(prev) { return [{ tone: tr.emotional_tone, path: path, at: Date.now(), amplified: false }].concat(prev).slice(0, MAX_ECHOES); });
     var newContribs = cbR.current.concat([{ tone: tr.emotional_tone, path: path }]);
     setContribs(newContribs);
-    setRecTones(function(prev) { return [tr.emotional_tone].concat(prev).slice(0, 5); });
+    setRecTones(function(prev) { return [tr.emotional_tone].concat(prev).slice(0, 20); });
     setLastTone(tr.emotional_tone);
     setTrace(null);
     revealTraceR.current = null;
@@ -1422,7 +1430,7 @@ function ResonanceSpace({ user, pair, onDissolve }) {
 
     // Detect at most ONE moment (with cooldown + priority)
     try {
-      var moment = await detectMoment(pair.id, user.id, tr, tr.emotional_tone);
+      var moment = await detectMoment(pair.id, user.id, tr, tr.emotional_tone, partnerId);
       if (moment) {
         // Amplified reveal is now automatic — no picker, just enhanced echo
         if (moment.automatic) {
@@ -1491,6 +1499,7 @@ function ResonanceSpace({ user, pair, onDissolve }) {
   // Amplified reveal: auto-persist after intro, then go to glimpse
   var onIntroAmpDone = useCallback(function() { soundMoment(); hapticMoment(); finishMoment({ amplified: true }); }, [finishMoment]);
   var onIntroConvDone = useCallback(function() { soundMoment(); hapticMoment(); setMPhase("echo"); }, []);
+  var onIntroResDone = useCallback(function() { soundMoment(); hapticMoment(); finishMoment({ tone_resonance: true }); }, [finishMoment]);
 
   var onWhisperSelect = useCallback(function(w) {
     hapticLight();
@@ -1544,9 +1553,41 @@ function ResonanceSpace({ user, pair, onDissolve }) {
     if (onbStepR.current < 4) setOnbStep(4);
     try {
       await sendTrace(pair.id, user.id, partnerId, data.path, data.tone, cbR.current.length === 0);
+      var newContribs = cbR.current.concat([{ tone: data.tone, path: data.path }]);
       setContribs(function(prev) { return prev.concat([{ tone: data.tone, path: data.path }]); });
-      setRecTones(function(prev) { return [data.tone].concat(prev).slice(0, 5); });
+      setRecTones(function(prev) { return [data.tone].concat(prev).slice(0, 20); });
       setLastTone(data.tone);
+
+      // Gesture memory: once after 20 own traces, show one-time subtle observation
+      try {
+        var myCount = newContribs.filter(function(c) { return true; }).length;
+        var shownKey = 'resona_gesture_memory_' + (pair ? pair.id : '');
+        if (myCount === 20 && !localStorage.getItem(shownKey)) {
+          localStorage.setItem(shownKey, '1');
+          var myPaths = newContribs.slice(-20).map(function(c) { return c.path; }).filter(Boolean);
+          if (myPaths.length >= 10) {
+            var totalLen = 0, totalDirChanges = 0;
+            myPaths.forEach(function(p) {
+              if (!p || p.length < 2) return;
+              for (var i = 1; i < p.length; i++) {
+                totalLen += Math.sqrt((p[i].x-p[i-1].x)**2 + (p[i].y-p[i-1].y)**2);
+                if (i > 1) {
+                  var cx = p[i-1].x-p[i-2].x, cy = p[i-1].y-p[i-2].y;
+                  var dx = p[i].x-p[i-1].x, dy = p[i].y-p[i-1].y;
+                  if (Math.abs(cx*dy-cy*dx) > 0.0001) totalDirChanges++;
+                }
+              }
+            });
+            var avgLen = totalLen / myPaths.length;
+            var avgDir = totalDirChanges / myPaths.length;
+            var obs = avgDir > 12 ? "your traces carry a lot of turns" :
+                      avgLen < 0.4 ? "you tend to draw short" :
+                      avgLen > 0.9 ? "your traces reach far" :
+                      avgDir < 4 ? "your traces pull in one direction" : null;
+            if (obs) setMilestone(obs);
+          }
+        }
+      } catch(e) {}
     } catch (err) {
       console.error("Send error:", err);
       setCanSend(true);
@@ -1931,6 +1972,7 @@ function ResonanceSpace({ user, pair, onDissolve }) {
       {mPhase === "twin_connection_intro" ? <MomentIntro rgb={mRgb} label="SOMETHING RARE HAPPENED" onDone={onIntroTwinDone} /> : null}
       {mPhase === "amplified_reveal_intro" ? <MomentIntro rgb={mRgb} label="THIS TRACE TOOK TIME" onDone={onIntroAmpDone} /> : null}
       {mPhase === "trace_convergence_intro" ? <MomentIntro rgb={mRgb} label="YOUR TRACES CONVERGED" onDone={onIntroConvDone} /> : null}
+      {mPhase === "tone_resonance_intro" ? <ToneResonanceMoment rgb={mRgb} tone={mTone} onDone={onIntroResDone} /> : null}
 
       {/* Moment pickers */}
       {mPhase === "whisper" ? <WhisperPickerUI rgb={mRgb} onSelect={onWhisperSelect} onTimeout={onWhisperTimeout} /> : null}
@@ -2262,6 +2304,37 @@ function MomentIntro({ rgb, label, onDone }) {
   return <div style={{ position:"absolute",inset:0,zIndex:44,display:"flex",alignItems:"center",justifyContent:"center",background:"rgba(6,6,12,"+(al*0.85)+")",fontFamily:FONT,pointerEvents:"none" }}><div style={{ textAlign:"center" }}><div style={{ width:3,height:3,borderRadius:"50%",background:"rgba("+rgb+","+(al*0.8)+")",boxShadow:"0 0 30px rgba("+rgb+","+(al*0.4)+")",margin:"0 auto 16px" }} /><div style={{ color:"rgba("+rgb+","+(al*0.5)+")",fontSize:12,letterSpacing:"0.3em",fontWeight:200 }}>{label}</div></div></div>;
 }
 
+function ToneResonanceMoment({ rgb, tone, onDone }) {
+  var cvRef = useRef(null);
+  useEffect(function() {
+    var c = cvRef.current; if (!c) return;
+    var ctx = c.getContext("2d"), dpr = window.devicePixelRatio || 1;
+    var rect = c.getBoundingClientRect();
+    c.width = rect.width * dpr; c.height = rect.height * dpr; ctx.scale(dpr, dpr);
+    var w = rect.width, h = rect.height;
+    var start = Date.now(), dur = 4500, af;
+    function draw() {
+      var pr = Math.min(1, (Date.now() - start) / dur);
+      var a = pr < 0.2 ? pr / 0.2 : pr > 0.65 ? 1 - (pr - 0.65) / 0.35 : 1;
+      ctx.clearRect(0, 0, w, h);
+      var cx = w / 2, cy = h / 2;
+      for (var i = 0; i < 3; i++) {
+        var r = (80 + i * 60) * a;
+        var ga = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+        ga.addColorStop(0, "rgba(" + rgb + "," + (a * 0.18 / (i + 1)) + ")");
+        ga.addColorStop(1, "transparent");
+        ctx.fillStyle = ga; ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+      }
+      if (pr < 1) af = requestAnimationFrame(draw); else onDone();
+    }
+    af = requestAnimationFrame(draw);
+    return function() { cancelAnimationFrame(af); };
+  }, [rgb, onDone]);
+  return <div style={{ position:"absolute",inset:0,zIndex:44,pointerEvents:"none" }}>
+    <canvas ref={cvRef} style={{ position:"absolute",inset:0,width:"100%",height:"100%" }} />
+  </div>;
+}
+
 function WhisperPickerUI({ rgb, onSelect, onTimeout }) {
   var _t = useState(15), tm = _t[0], st = _t[1];
   var words = useRef(pickN(WHISPER_POOL, 5));
@@ -2458,12 +2531,14 @@ function GlimpseCanvas({ contribs, onDone }) {
     var c = ref.current; if (!c) return;
     var ctx = c.getContext("2d"), dpr = window.devicePixelRatio || 1, rect = c.getBoundingClientRect();
     c.width = rect.width * dpr; c.height = rect.height * dpr; ctx.scale(dpr, dpr);
-    var w = rect.width, h = rect.height, cx = w/2, cy = h/2, start = Date.now(), dur = 9000, af, gt = textRef.current;
+    var w = rect.width, h = rect.height, cx = w/2, cy = h/2, start = Date.now(), af, gt = textRef.current;
+    var n = contribs.length;
+    var dur = n <= 10 ? 6000 : n <= 30 ? 8000 : n <= 60 ? 11000 : n <= 100 ? 14000 : 18000;
     function draw() {
       try {
       var pr = Math.min(1,(Date.now()-start)/dur), fi = Math.min(1,pr*3), fo = pr>0.75?1-(pr-0.75)/0.25:1, a = fi*fo;
       ctx.clearRect(0,0,w,h); ctx.fillStyle = "rgba(6,6,12,"+(0.93*a)+")"; ctx.fillRect(0,0,w,h);
-      var baseR = contribs.length<=2?0.38:contribs.length<=5?0.44:0.50;
+      var baseR = n<=2?0.34:n<=10?0.42:n<=30?0.50:n<=60?0.56:0.62;
       var vr = Math.min(w,h)*baseR*a;
       if(vr<2){if(pr>=1)setTimeout(onDone,200);else af=requestAnimationFrame(draw);return;}
       ctx.save();ctx.beginPath();ctx.arc(cx,cy,vr,0,Math.PI*2);ctx.clip();

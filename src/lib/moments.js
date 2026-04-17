@@ -1,7 +1,7 @@
 // ══════════════════════════════════════════
 // Resona Moment Detection
 // — Cooldown between moments (configurable, default 5h)
-// — Priority: twin_connection > trace_convergence > amplified_reveal
+// — Priority: twin_connection > trace_convergence > tone_resonance > amplified_reveal
 // — Only ONE moment per reveal (the highest-priority match)
 // — Events are written to DB so the partner receives them
 // ══════════════════════════════════════════
@@ -76,8 +76,37 @@ async function checkTraceConvergence(pairId, justDiscoveredTrace) {
   };
 }
 
+// ── Tone Resonance ──
+// Both partners used the same tone ≥3 times each within the last 72 hours
+async function checkToneResonance(pairId, userId, partnerId) {
+  var traces = await getRecentTraces(pairId, 72);
+  if (traces.length < 6) return null;
+
+  var myTraces = traces.filter(function(t) { return t.sender_id === userId; });
+  var theirTraces = traces.filter(function(t) { return t.sender_id === partnerId; });
+  if (myTraces.length < 3 || theirTraces.length < 3) return null;
+
+  var toneCounts = {};
+  myTraces.forEach(function(t) { toneCounts[t.emotional_tone] = (toneCounts[t.emotional_tone] || 0) + 1; });
+
+  var resonantTone = null;
+  Object.keys(toneCounts).forEach(function(tk) {
+    if (toneCounts[tk] < 3) return;
+    var theirCount = theirTraces.filter(function(t) { return t.emotional_tone === tk; }).length;
+    if (theirCount >= 3) resonantTone = tk;
+  });
+
+  if (!resonantTone) return null;
+
+  return {
+    type: 'tone_resonance',
+    tone: resonantTone,
+    triggerTraces: traces.slice(0, 3).map(function(t) { return t.id; }),
+  };
+}
+
 // ── Main detection ──
-export async function detectMoment(pairId, userId, justDiscoveredTrace, tone) {
+export async function detectMoment(pairId, userId, justDiscoveredTrace, tone, partnerId) {
   try {
     var lastEvent = await getLastResonanceEvent(pairId);
     if (lastEvent) {
@@ -101,6 +130,11 @@ export async function detectMoment(pairId, userId, justDiscoveredTrace, tone) {
 
   var conv = await checkTraceConvergence(pairId, justDiscoveredTrace);
   if (conv) candidates.push(conv);
+
+  if (partnerId) {
+    var res = await checkToneResonance(pairId, userId, partnerId);
+    if (res) candidates.push(res);
+  }
 
   if (candidates.length === 0) return null;
 

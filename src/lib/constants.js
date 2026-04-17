@@ -84,8 +84,9 @@ export var STILL_HERE_COOLDOWN_HOURS = 4;
 export var NUDGE_DELAY_HOURS = 2;
 // Priority order (higher = rarer, more important)
 export var MOMENT_PRIORITY = {
-  twin_connection: 3,
-  trace_convergence: 2,
+  twin_connection: 4,
+  trace_convergence: 3,
+  tone_resonance: 2,
   amplified_reveal: 1,
 };
 
