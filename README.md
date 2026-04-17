@@ -23,15 +23,39 @@ Run these SQL files in order in the Supabase SQL Editor:
 1. `supabase-schema.sql` — tables, RLS policies, core functions
 2. `supabase-migration.sql` — proposals, artwork reset, dissolve, realtime
 3. `supabase-migration-2.sql` — still-here, nudge, turn-based sending, RLS fix
-4. `supabase-migration-3.sql` — automatic inactive pair cleanup (requires pg_cron extension)
+4. `supabase-cleanup.sql` — automatic inactive pair cleanup (requires pg_cron extension)
 
-For migration 3: enable pg_cron first via Supabase Dashboard → Database → Extensions → pg_cron.
+For the cleanup migration: enable pg_cron first via Supabase Dashboard → Database → Extensions → pg_cron.
 
 Then configure:
 
 - **Authentication → Providers**: enable Anonymous Sign-Ins + Email
 - **Authentication → URL Configuration**: set Site URL to `https://resona-app.com` and add it to Redirect URLs
 - **`src/lib/supabase.js`**: update `SUPABASE_URL` and `SUPABASE_KEY` with your project credentials
+
+### Push Notifications Setup
+
+Push notifications use the Web Push / VAPID standard. Required steps:
+
+**1. Set the public key in your build environment:**
+```
+# .env (not committed — see .env.example for the key)
+VITE_VAPID_PUBLIC_KEY=BLUkl1-HtNoVw5rc_...
+```
+
+**2. Deploy the Edge Function:**
+```bash
+supabase functions deploy send-push
+```
+
+**3. Set Edge Function secrets in Supabase Dashboard → Edge Functions → send-push → Secrets:**
+```
+VAPID_PUBLIC_KEY=BLUkl1-HtNoVw5rc_...
+VAPID_PRIVATE_KEY=<private key — see supabase/functions/send-push/.env>
+VAPID_SUBJECT=mailto:admin@wolf-webentwicklung.de
+```
+
+The `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and `SUPABASE_ANON_KEY` are injected automatically by Supabase.
 
 ### Build & Deploy
 
@@ -79,7 +103,9 @@ Everyone starts as a guest (anonymous, device-bound). In Settings, guests can se
 
 ### Sending a Trace
 
-Tap the send button at the bottom of the space. Choose an emotional tone — each plays a short preview sound and flashes its color:
+Tap the send button at the bottom of the space. Choose an emotional tone — each plays a short preview sound and flashes its color.
+
+**Always available (from trace 0):**
 
 | Tone | Color | Feel |
 |------|-------|------|
@@ -89,7 +115,29 @@ Tap the send button at the bottom of the space. Choose an emotional tone — eac
 | Warmth | Soft orange | Round, full gestures |
 | Playfulness | Bright cyan | Bouncing, rhythmic lines |
 
+**Unlocked as the pair exchanges more traces:**
+
+| Tone | Unlocks at | Color | Feel |
+|------|-----------|-------|------|
+| Ruhe | 25 traces | Soft slate blue | Still, resting marks |
+| Hingabe | 40 traces | Warm amber | Surrendered, open strokes |
+| Trauer | 55 traces | Deep navy | Heavy, slow lines |
+| Staunen | 70 traces | Soft violet | Vast, wondering gestures |
+| Begehren | 85 traces | Deep rose | Pulling, magnetic marks |
+
+When a new tone unlocks, a one-time awakening animation plays before the tone picker.
+
 Draw your gesture on the canvas, release to send. The trace goes to your partner. You cannot send again until they send one back (turn-based).
+
+### Discovery Modes
+
+Each trace is assigned a discovery mode that changes how it's found:
+
+- **Stillness** — The trace sits at a fixed position. Standard search.
+- **Wake** — The trace pulses rhythmically. Stronger visual feedback.
+- **Follow** — The trace drifts slowly across the space. You have to track it.
+
+The first 10 pair traces always use Stillness mode (to build familiarity). After that, modes are randomly assigned per trace.
 
 ### Discovering a Trace
 
@@ -100,7 +148,7 @@ When a trace arrives, the space says "SOMETHING IS HERE". Touch the screen and m
 - **Close**: strong pull, connection line to the hidden point
 - **Found**: hold ring appears — hold for 1.5 seconds to reveal
 
-Discovery difficulty varies by tone: Nearness is easiest to find (large radius), Tension is hardest (small radius). Playfulness traces drift slowly — you follow them.
+Discovery difficulty varies by tone: Nearness is easiest to find (large radius), Tension is hardest (small radius).
 
 ### Reveal & Glimpse
 
@@ -117,6 +165,8 @@ Every trace from both partners contributes to an invisible shared artwork. It us
 Rare events triggered by specific conditions. Maximum one per reveal, 5-hour cooldown between moments. Priority determines which fires if multiple conditions are met.
 
 **Twin Connection** (highest priority): Both partners sent a trace within 15 minutes of each other. The revealer picks a whisper word from a rotating pool of 25 — the partner receives it as a glowing text overlay.
+
+**Tone Resonance**: Both partners chose the same emotional tone within the last 3 traces. A tone-colored resonance pulse fills the space — both partners see it simultaneously.
 
 **Trace Convergence**: The revealed trace overlaps >45% with a recent trace from the partner. The revealer picks an echo mark (symbol) from a pool of 15 — the partner sees it in their space.
 
@@ -139,6 +189,10 @@ Rare events triggered by specific conditions. Maximum one per reveal, 5-hour coo
 **Nudge**: When your sent trace has been undiscovered for 2+ hours, "send a gentle reminder" appears. One tap sends a notification to your partner ("your person is waiting"). Maximum once per undiscovered trace.
 
 **Milestones**: Silent, one-time text overlays at trace counts 1, 10, 25, 50, 100 ("the first mark", "something is growing", etc.).
+
+**Streak**: Consecutive days on which at least one trace was sent. Visible in Settings. Both current streak and total active days are tracked.
+
+**Chapter Ghost**: After a Start Fresh reset, a faint ghost echo of the previous artwork chapter remains visible in the new space — a memory of what was built before.
 
 ---
 
@@ -183,8 +237,8 @@ Haptic feedback (vibration API) fires on proximity zones, hold, reveal, moments,
 ### Stack
 
 - **Frontend**: React 18, Vite 5, single-file architecture (`App.jsx`)
-- **Backend**: Supabase (Postgres, Auth, Realtime, RLS)
-- **PWA**: Service worker, manifest, installable on Android/iOS
+- **Backend**: Supabase (Postgres, Auth, Realtime, RLS, Edge Functions)
+- **PWA**: Service worker, Web Push (VAPID), installable on Android/iOS
 - **Audio**: Web Audio API (synthesized, no files)
 - **Rendering**: HTML5 Canvas with Perlin noise, particle systems
 
@@ -216,7 +270,11 @@ resona/
 ├── supabase-schema.sql          Base schema
 ├── supabase-migration.sql       Migration 1: proposals
 ├── supabase-migration-2.sql     Migration 2: events, turn-based, RLS fix
-├── supabase-migration-3.sql     Migration 3: automatic inactive pair cleanup
+├── supabase-cleanup.sql         Automatic inactive pair cleanup (pg_cron)
+├── supabase/
+│   └── functions/
+│       └── send-push/
+│           └── index.ts         Edge Function: deliver Web Push to partner
 ├── index.html                   Dev entry point
 ├── package.json
 └── vite.config.js
@@ -262,3 +320,5 @@ resona/
 | Milestones | 1, 10, 25, 50, 100 traces |
 | Inactive pair cleanup | 14 days without any activity |
 | Draw Together unlock | ≥6 traces exchanged, ≥7 days since last session |
+| Tone unlock thresholds | Ruhe: 25, Hingabe: 40, Trauer: 55, Staunen: 70, Begehren: 85 |
+| Discovery modes | Stillness (first 10), then random: stillness / wake / follow |

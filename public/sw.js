@@ -1,4 +1,4 @@
-// Resona Service Worker — App Shell caching
+// Resona Service Worker — App Shell caching + Push Notifications
 var CACHE_NAME = 'resona-v2';
 var SHELL_URLS = [
   '/',
@@ -50,4 +50,38 @@ self.addEventListener('fetch', function(event) {
       })
     );
   }
+});
+
+self.addEventListener('push', function(event) {
+  var data = {};
+  try { data = event.data ? event.data.json() : {}; } catch(e) {}
+  var title = data.title || 'Resona';
+  var body = data.body || 'something is here';
+  var tag = data.tag || 'resona';
+  event.waitUntil(
+    self.registration.showNotification(title, {
+      body: body,
+      icon: '/icon-192.png',
+      badge: '/icon-192.png',
+      tag: tag,
+      renotify: true,
+      vibrate: [100, 50, 100],
+      data: { url: self.location.origin },
+    })
+  );
+});
+
+self.addEventListener('notificationclick', function(event) {
+  event.notification.close();
+  var targetUrl = (event.notification.data && event.notification.data.url) || self.location.origin;
+  event.waitUntil(
+    clients.matchAll({ type: 'window', includeUncontrolled: true }).then(function(list) {
+      for (var i = 0; i < list.length; i++) {
+        if (list[i].url.startsWith(targetUrl)) {
+          return list[i].focus();
+        }
+      }
+      return clients.openWindow(targetUrl);
+    })
+  );
 });
