@@ -37,27 +37,22 @@ Then configure:
 
 Push notifications use the Web Push / VAPID standard. Required steps:
 
-**1. Generate VAPID keys:**
-```bash
-npx web-push generate-vapid-keys
+**1. Set the public key in your build environment:**
+```
+# .env (not committed — see .env.example for the key)
+VITE_VAPID_PUBLIC_KEY=BLUkl1-HtNoVw5rc_...
 ```
 
-**2. Set the public key in your build environment:**
-```
-# .env (not committed)
-VITE_VAPID_PUBLIC_KEY=<your public key>
-```
-
-**3. Deploy the Edge Function:**
+**2. Deploy the Edge Function:**
 ```bash
 supabase functions deploy send-push
 ```
 
-**4. Set Edge Function secrets in Supabase Dashboard → Edge Functions → send-push → Secrets:**
+**3. Set Edge Function secrets in Supabase Dashboard → Edge Functions → send-push → Secrets:**
 ```
-VAPID_PUBLIC_KEY=<your public key>
-VAPID_PRIVATE_KEY=<your private key>
-VAPID_SUBJECT=mailto:your@email.com
+VAPID_PUBLIC_KEY=BLUkl1-HtNoVw5rc_...
+VAPID_PRIVATE_KEY=<private key — see supabase/functions/send-push/.env>
+VAPID_SUBJECT=mailto:admin@wolf-webentwicklung.de
 ```
 
 The `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and `SUPABASE_ANON_KEY` are injected automatically by Supabase.

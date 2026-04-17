@@ -853,21 +853,37 @@ function ResonanceSpace({ user, pair, onDissolve }) {
   useEffect(function() {
     if (!user) return;
     if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
-    if (Notification.permission !== 'granted') return;
     var vapidKey = import.meta.env.VITE_VAPID_PUBLIC_KEY;
     if (!vapidKey || vapidKey === 'YOUR_VAPID_PUBLIC_KEY_HERE') return;
-    navigator.serviceWorker.ready.then(function(reg) {
-      reg.pushManager.getSubscription().then(function(existing) {
-        if (existing) {
-          savePushSubscription(user.id, JSON.stringify(existing)).catch(function() {});
-          return;
-        }
-        var key = urlBase64ToUint8Array(vapidKey);
-        reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key })
-          .then(function(sub) { savePushSubscription(user.id, JSON.stringify(sub)).catch(function() {}); })
-          .catch(function(e) { console.warn('Push subscribe failed:', e); });
+
+    function trySubscribe() {
+      if (Notification.permission !== 'granted') return;
+      navigator.serviceWorker.ready.then(function(reg) {
+        reg.pushManager.getSubscription().then(function(existing) {
+          if (existing) {
+            savePushSubscription(user.id, JSON.stringify(existing)).catch(function() {});
+            return;
+          }
+          var key = urlBase64ToUint8Array(vapidKey);
+          reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key })
+            .then(function(sub) { savePushSubscription(user.id, JSON.stringify(sub)).catch(function() {}); })
+            .catch(function(e) { console.warn('Push subscribe failed:', e); });
+        });
       });
-    });
+    }
+
+    trySubscribe();
+
+    // Re-try if user grants permission after the Space mounts (permission dialog answered late)
+    var permStatus = null;
+    if (navigator.permissions) {
+      navigator.permissions.query({ name: 'notifications' }).then(function(status) {
+        permStatus = status;
+        status.onchange = trySubscribe;
+      }).catch(function() {});
+    }
+
+    return function() { if (permStatus) permStatus.onchange = null; };
   }, [user]);
 
   // ── Realtime: traces ──
@@ -2287,6 +2303,7 @@ function IncomingMomentDisplay({ event, pair, onDismiss }) {
 // ══════════════════════════════════════
 // PWA INSTALL PROMPT
 // Shows once after first trace exchange — persisted in localStorage
+// beforeinstallprompt is captured early in main.jsx (window.__deferredInstallPrompt)
 // ══════════════════════════════════════
 function InstallPrompt({ traceCount }) {
   var _s = useState(false), show = _s[0], setShow = _s[1];
@@ -2299,8 +2316,11 @@ function InstallPrompt({ traceCount }) {
     if (isStandalone) return;
     try { if (localStorage.getItem("resona_install_dismissed")) return; } catch(e) {}
 
-    // Android: capture native install prompt
-    var handler = function(e) { e.preventDefault(); setDeferredPrompt(e); };
+    // Pick up the prompt captured early in main.jsx (avoids missing the one-time event)
+    if (window.__deferredInstallPrompt) setDeferredPrompt(window.__deferredInstallPrompt);
+
+    // Also listen in case it fires after React mounts (some browsers re-fire)
+    var handler = function(e) { e.preventDefault(); setDeferredPrompt(e); window.__deferredInstallPrompt = e; };
     window.addEventListener("beforeinstallprompt", handler);
 
     var t = setTimeout(function() { setShow(true); }, 3000);
