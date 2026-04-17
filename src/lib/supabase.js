@@ -485,3 +485,22 @@ export async function getStreakData(userId) {
   }
   return { current, totalDays: uniqueDates.length };
 }
+
+// ── Push: save subscription to DB ──
+export async function savePushSubscription(userId, subscriptionJson) {
+  await supabase.from('users').update({ push_token: subscriptionJson }).eq('id', userId);
+}
+
+// ── Push: call Edge Function to deliver push to partner ──
+export async function sendPushToPartner(eventType, pairId) {
+  const { data: { session } } = await supabase.auth.getSession();
+  if (!session) return;
+  await fetch(`${SUPABASE_URL}/functions/v1/send-push`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${session.access_token}`,
+    },
+    body: JSON.stringify({ event_type: eventType, pair_id: pairId }),
+  });
+}

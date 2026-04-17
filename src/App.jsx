@@ -9,7 +9,7 @@ import {
   getActiveProposal, proposeReunion, proposeReset, proposeReveal, respondToProposal, completeProposal, executeResetArtwork, subscribeToProposals,
   sendStillHere, getLastStillHere, sendNudge, getLastNudge, getLastSentTrace,
   getLastPairTrace, createCanvasChannel, sendCanvasBroadcast, saveSharedCanvas,
-  getStreakData,
+  getStreakData, savePushSubscription, sendPushToPartner,
   supabase
 } from './lib/supabase.js';
 import { detectMoment, persistMoment } from './lib/moments.js';
@@ -24,6 +24,16 @@ import {
   WAKE_BREATH_CYCLE_MS, WAKE_THRESHOLD, FOLLOW_DURATION_MS,
   TONE_UNLOCK_THRESHOLDS, getAvailableTones
 } from './lib/constants.js';
+
+// ── VAPID helper: base64url → Uint8Array for push subscription ──
+function urlBase64ToUint8Array(base64String) {
+  var padding = '='.repeat((4 - base64String.length % 4) % 4);
+  var base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  var rawData = window.atob(base64);
+  var output = new Uint8Array(rawData.length);
+  for (var i = 0; i < rawData.length; i++) output[i] = rawData.charCodeAt(i);
+  return output;
+}
 
 // ══════════════════════════════════════
 // WELCOME SCREEN — with subtle trace animation
@@ -774,6 +784,7 @@ function ResonanceSpace({ user, pair, onDissolve }) {
               } else {
                 // A nudge was already sent after this trace — don't show button again
                 setNudgeReady(false);
+                setNudgeSent(true);
               }
             }
           }
@@ -794,6 +805,7 @@ function ResonanceSpace({ user, pair, onDissolve }) {
                 } else {
                   // Already sent a turn nudge — don't show again
                   setTurnNudgeReady(false);
+                  setTurnNudgeSent(true);
                 }
               }
             }
@@ -836,6 +848,27 @@ function ResonanceSpace({ user, pair, onDissolve }) {
   var pendingTraceRef = useRef(null);
   var sentCountR = useRef(0);
   var ghostChapterR = useRef(null); // faint echo of previous chapter after Start Fresh
+
+  // ── Push subscription: register after permission granted ──
+  useEffect(function() {
+    if (!user) return;
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
+    if (Notification.permission !== 'granted') return;
+    var vapidKey = import.meta.env.VITE_VAPID_PUBLIC_KEY;
+    if (!vapidKey || vapidKey === 'YOUR_VAPID_PUBLIC_KEY_HERE') return;
+    navigator.serviceWorker.ready.then(function(reg) {
+      reg.pushManager.getSubscription().then(function(existing) {
+        if (existing) {
+          savePushSubscription(user.id, JSON.stringify(existing)).catch(function() {});
+          return;
+        }
+        var key = urlBase64ToUint8Array(vapidKey);
+        reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key })
+          .then(function(sub) { savePushSubscription(user.id, JSON.stringify(sub)).catch(function() {}); })
+          .catch(function(e) { console.warn('Push subscribe failed:', e); });
+      });
+    });
+  }, [user]);
 
   // ── Realtime: traces ──
   useEffect(function() {
@@ -1589,6 +1622,7 @@ function ResonanceSpace({ user, pair, onDissolve }) {
     if (onbStepR.current < 4) setOnbStep(4);
     try {
       await sendTrace(pair.id, user.id, partnerId, data.path, data.tone, cbR.current.length === 0);
+      sendPushToPartner('trace', pair.id).catch(function() {});
       sentCountR.current += 1;
       setContribs(function(prev) { return prev.concat([{ tone: data.tone, path: data.path }]); });
       setRecTones(function(prev) { return [data.tone].concat(prev).slice(0, 20); });
@@ -1644,6 +1678,7 @@ function ResonanceSpace({ user, pair, onDissolve }) {
     soundNudge(); hapticLight();
     try {
       await sendNudge(pair.id, user.id);
+      sendPushToPartner('nudge', pair.id).catch(function() {});
     } catch (e) { console.error("Nudge error:", e); }
   }, [pair, user]);
 
@@ -1662,6 +1697,7 @@ function ResonanceSpace({ user, pair, onDissolve }) {
     soundNudge(); hapticLight();
     try {
       await sendNudge(pair.id, user.id);
+      sendPushToPartner('turn_reminder', pair.id).catch(function() {});
     } catch (e) { console.error("Turn nudge error:", e); }
   }, [pair, user]);
 
@@ -1857,8 +1893,8 @@ function ResonanceSpace({ user, pair, onDissolve }) {
         <div onClick={function() { window.location.reload(); }} style={{ padding:"14px 40px",borderRadius:24,border:"1px solid rgba(255,255,255,0.08)",background:"rgba(255,255,255,0.03)",cursor:"pointer",color:"rgba(255,255,255,0.52)",fontSize:12,letterSpacing:"0.18em",fontWeight:200 }}>START OVER</div>
       </div> : null}
 
-      {/* PWA install prompt (only in browser, not standalone) */}
-      <InstallPrompt />
+      {/* PWA install prompt (only after first trace, only once) */}
+      <InstallPrompt traceCount={contribs.length} />
 
       {/* Email linking overlay */}
       {showEmail ? <EmailLinkUI onDone={function() { setShowEmail(false); }} /> : null}
@@ -2250,35 +2286,39 @@ function IncomingMomentDisplay({ event, pair, onDismiss }) {
 
 // ══════════════════════════════════════
 // PWA INSTALL PROMPT
-// Shows a subtle banner when not installed as PWA
+// Shows once after first trace exchange — persisted in localStorage
 // ══════════════════════════════════════
-function InstallPrompt() {
+function InstallPrompt({ traceCount }) {
   var _s = useState(false), show = _s[0], setShow = _s[1];
   var _dip = useState(null), deferredPrompt = _dip[0], setDeferredPrompt = _dip[1];
 
   useEffect(function() {
+    if (traceCount < 1) return;
     var isStandalone = window.matchMedia("(display-mode: standalone)").matches
       || window.navigator.standalone === true;
     if (isStandalone) return;
-    try { if (sessionStorage.getItem("resona_install_dismissed")) return; } catch(e) {}
+    try { if (localStorage.getItem("resona_install_dismissed")) return; } catch(e) {}
 
     // Android: capture native install prompt
     var handler = function(e) { e.preventDefault(); setDeferredPrompt(e); };
     window.addEventListener("beforeinstallprompt", handler);
 
-    var t = setTimeout(function() { setShow(true); }, 8000);
+    var t = setTimeout(function() { setShow(true); }, 3000);
     return function() { clearTimeout(t); window.removeEventListener("beforeinstallprompt", handler); };
-  }, []);
+  }, [traceCount]);
 
   var dismiss = useCallback(function() {
     setShow(false);
-    try { sessionStorage.setItem("resona_install_dismissed", "1"); } catch(e) {}
+    try { localStorage.setItem("resona_install_dismissed", "1"); } catch(e) {}
   }, []);
 
   var install = useCallback(function() {
     if (deferredPrompt) {
       deferredPrompt.prompt();
-      deferredPrompt.userChoice.then(function() { setShow(false); });
+      deferredPrompt.userChoice.then(function() {
+        setShow(false);
+        try { localStorage.setItem("resona_install_dismissed", "1"); } catch(e) {}
+      });
     }
   }, [deferredPrompt]);
 
@@ -2288,27 +2328,33 @@ function InstallPrompt() {
   var canNativeInstall = !!deferredPrompt;
 
   return <div style={{ position:"absolute",inset:0,zIndex:56,display:"flex",alignItems:"center",justifyContent:"center",pointerEvents:"none" }}>
-    <div style={{ pointerEvents:"auto",maxWidth:300,padding:"24px 28px",borderRadius:20,background:"rgba(17,17,24,0.95)",border:"1px solid rgba(255,255,255,0.08)",fontFamily:FONT,textAlign:"center",animation:"fadeIn 0.8s ease",backdropFilter:"blur(12px)",WebkitBackdropFilter:"blur(12px)" }}>
-      <div style={{ color:"rgba(255,255,255,0.57)",fontSize:13,letterSpacing:"0.15em",fontWeight:300,marginBottom:10 }}>Install Resona</div>
+    <div style={{ pointerEvents:"auto",maxWidth:300,padding:"28px 28px",borderRadius:20,background:"rgba(17,17,24,0.96)",border:"1px solid rgba(255,255,255,0.08)",fontFamily:FONT,textAlign:"center",animation:"fadeIn 0.8s ease",backdropFilter:"blur(12px)",WebkitBackdropFilter:"blur(12px)" }}>
+      <div style={{ color:"rgba(255,255,255,0.57)",fontSize:13,letterSpacing:"0.15em",fontWeight:300,marginBottom:14 }}>Add to Home Screen</div>
       {canNativeInstall ? (
         <div>
-          <div style={{ color:"rgba(255,255,255,0.58)",fontSize:12,fontWeight:200,marginBottom:18 }}>add to your home screen for the best experience</div>
+          <div style={{ color:"rgba(255,255,255,0.5)",fontSize:12,fontWeight:200,lineHeight:1.8,marginBottom:20 }}>Add Resona to your home screen for the best experience — full screen, no browser UI.</div>
           <div style={{ display:"flex",gap:12,justifyContent:"center" }}>
-            <div onClick={dismiss} style={{ padding:"10px 20px",borderRadius:20,border:"1px solid rgba(255,255,255,0.06)",cursor:"pointer",color:"rgba(255,255,255,0.58)",fontSize:12,fontWeight:200 }}>Later</div>
-            <div onClick={install} style={{ padding:"10px 20px",borderRadius:20,border:"1px solid rgba(212,165,116,0.2)",background:"rgba(212,165,116,0.06)",cursor:"pointer",color:"rgba(212,165,116,0.7)",fontSize:12,fontWeight:300 }}>Install</div>
+            <div onClick={dismiss} style={{ padding:"10px 20px",borderRadius:20,border:"1px solid rgba(255,255,255,0.06)",cursor:"pointer",color:"rgba(255,255,255,0.45)",fontSize:12,fontWeight:200 }}>not now</div>
+            <div onClick={install} style={{ padding:"10px 20px",borderRadius:20,border:"1px solid rgba(212,165,116,0.2)",background:"rgba(212,165,116,0.06)",cursor:"pointer",color:"rgba(212,165,116,0.7)",fontSize:12,fontWeight:300 }}>Add</div>
           </div>
         </div>
       ) : isIOS ? (
         <div>
-          <div style={{ color:"rgba(255,255,255,0.58)",fontSize:12,fontWeight:200,lineHeight:1.8,marginBottom:16 }}>
-            tap <span style={{ fontSize:16,verticalAlign:"middle" }}>{"\u2191"}</span> at the bottom of Safari{"\n"}then choose <em>Add to Home Screen</em>
+          <div style={{ color:"rgba(255,255,255,0.5)",fontSize:12,fontWeight:200,lineHeight:1.9,marginBottom:8 }}>
+            1. Tap <span style={{ color:"rgba(212,165,116,0.7)",fontSize:15,verticalAlign:"middle" }}>{"\u2191"}</span> in Safari's toolbar
           </div>
-          <div onClick={dismiss} style={{ padding:"10px 20px",borderRadius:20,border:"1px solid rgba(255,255,255,0.06)",cursor:"pointer",color:"rgba(255,255,255,0.63)",fontSize:12,fontWeight:200,display:"inline-block" }}>Got it</div>
+          <div style={{ color:"rgba(255,255,255,0.5)",fontSize:12,fontWeight:200,lineHeight:1.9,marginBottom:20 }}>
+            2. Choose <span style={{ color:"rgba(212,165,116,0.7)",fontStyle:"normal" }}>Add to Home Screen</span>
+          </div>
+          <div style={{ color:"rgba(255,255,255,0.35)",fontSize:11,fontWeight:200,lineHeight:1.7,marginBottom:20 }}>
+            This gives you full-screen mode and enables push notifications.
+          </div>
+          <div onClick={dismiss} style={{ padding:"10px 20px",borderRadius:20,border:"1px solid rgba(255,255,255,0.06)",cursor:"pointer",color:"rgba(255,255,255,0.5)",fontSize:12,fontWeight:200,display:"inline-block" }}>Got it</div>
         </div>
       ) : (
         <div>
-          <div style={{ color:"rgba(255,255,255,0.58)",fontSize:12,fontWeight:200,marginBottom:16 }}>add to your home screen for the best experience</div>
-          <div onClick={dismiss} style={{ padding:"10px 20px",borderRadius:20,border:"1px solid rgba(255,255,255,0.06)",cursor:"pointer",color:"rgba(255,255,255,0.63)",fontSize:12,fontWeight:200,display:"inline-block" }}>Got it</div>
+          <div style={{ color:"rgba(255,255,255,0.5)",fontSize:12,fontWeight:200,lineHeight:1.8,marginBottom:20 }}>Add Resona to your home screen for the best experience — full screen, no browser UI.</div>
+          <div onClick={dismiss} style={{ padding:"10px 20px",borderRadius:20,border:"1px solid rgba(255,255,255,0.06)",cursor:"pointer",color:"rgba(255,255,255,0.5)",fontSize:12,fontWeight:200,display:"inline-block" }}>Got it</div>
         </div>
       )}
     </div>
