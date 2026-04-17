@@ -1026,6 +1026,7 @@ function ResonanceSpace({ user, pair, onDissolve }) {
     resize(); window.addEventListener("resize", resize);
 
     function frame() {
+      try {
       var r = canvas.getBoundingClientRect(), w = r.width, h = r.height;
       timeR.current += 0.007; var t = timeR.current;
       var hp = hpR.current, ph = phR.current, tr = trR.current, tc = tcR.current, rt = rtR.current, re = reR.current, cb = cbR.current;
@@ -1322,6 +1323,7 @@ function ResonanceSpace({ user, pair, onDissolve }) {
           var grd = ctx.createRadialGradient(ex,ey,0,ex,ey,er); grd.addColorStop(0,"rgba("+td2.rgb[0]+","+td2.rgb[1]+","+td2.rgb[2]+","+ea+")"); grd.addColorStop(0.5,"rgba("+td2.rgb[0]+","+td2.rgb[1]+","+td2.rgb[2]+","+(ea*0.3)+")"); grd.addColorStop(1,"transparent"); ctx.fillStyle = grd; ctx.beginPath(); ctx.arc(ex,ey,er,0,Math.PI*2); ctx.fill();
         });
       }
+      } catch(e) { console.error("Frame error:", e); }
       afR.current = requestAnimationFrame(frame);
     }
     afR.current = requestAnimationFrame(frame);
@@ -2139,13 +2141,7 @@ function ResonanceSpace({ user, pair, onDissolve }) {
       }} onKeep={function() { setReunion(null); setReunionUI(null); }} /> : null}
 
       {/* Tone awakening overlay */}
-      {tonesAwakening && tonesAwakening.length > 0 ? <div onClick={function() { setTonesAwakening(null); }} style={{ position:"absolute",inset:0,zIndex:40,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",fontFamily:FONT,animation:"fadeIn 1.5s ease",cursor:"pointer" }}>
-        <div style={{ display:"flex",gap:16,marginBottom:24 }}>
-          {tonesAwakening.map(function(k) { return <div key={k} style={{ width:44,height:44,borderRadius:"50%",background:"radial-gradient(circle at 36% 36%,"+TONES[k].colors[0]+","+TONES[k].colors[1]+")",boxShadow:"0 0 40px "+TONES[k].primary+"88",animation:"gentlePulse 2s ease infinite" }} />; })}
-        </div>
-        {tonesAwakening.map(function(k) { return <div key={k} style={{ color:TONES[k].primary,fontSize:13,letterSpacing:"0.2em",fontWeight:200,opacity:0.7,marginBottom:4 }}>{TONES[k].name}</div>; })}
-        <div style={{ marginTop:16,color:"rgba(255,255,255,0.35)",fontSize:12,letterSpacing:"0.12em",fontWeight:200 }}>tap to continue</div>
-      </div> : null}
+      {tonesAwakening && tonesAwakening.length > 0 ? <ToneAwakeningOverlay tones={tonesAwakening} onDone={function() { setTonesAwakening(null); }} /> : null}
 
       {/* Bottom affordance */}
       {phase === "idle" || phase === "discovery" ? (
@@ -2346,6 +2342,27 @@ function MomentIntro({ rgb, label, onDone }) {
   var _a = useState(0), al = _a[0], sa = _a[1];
   useEffect(function() { var s = Date.now(); var iv = setInterval(function() { var pr = (Date.now()-s)/2200; if (pr >= 1) { clearInterval(iv); onDone(); } else sa(pr<0.3?pr/0.3:pr>0.7?1-(pr-0.7)/0.3:1); }, 20); return function() { clearInterval(iv); }; }, [onDone]);
   return <div style={{ position:"absolute",inset:0,zIndex:44,display:"flex",alignItems:"center",justifyContent:"center",background:"rgba(6,6,12,"+(al*0.85)+")",fontFamily:FONT,pointerEvents:"none" }}><div style={{ textAlign:"center" }}><div style={{ width:3,height:3,borderRadius:"50%",background:"rgba("+rgb+","+(al*0.8)+")",boxShadow:"0 0 30px rgba("+rgb+","+(al*0.4)+")",margin:"0 auto 16px" }} /><div style={{ color:"rgba("+rgb+","+(al*0.5)+")",fontSize:12,letterSpacing:"0.3em",fontWeight:200 }}>{label}</div></div></div>;
+}
+
+function ToneAwakeningOverlay({ tones, onDone }) {
+  var _a = useState(0), al = _a[0], sa = _a[1];
+  useEffect(function() {
+    var start = Date.now(), dur = 4000, af;
+    function tick() {
+      var pr = (Date.now() - start) / dur;
+      if (pr >= 1) { onDone(); return; }
+      sa(pr < 0.2 ? pr / 0.2 : pr > 0.7 ? 1 - (pr - 0.7) / 0.3 : 1);
+      af = requestAnimationFrame(tick);
+    }
+    af = requestAnimationFrame(tick);
+    return function() { cancelAnimationFrame(af); };
+  }, [onDone]);
+  return <div style={{ position:"absolute",bottom:120,left:0,right:0,zIndex:12,pointerEvents:"none",display:"flex",flexDirection:"column",alignItems:"center",gap:8,fontFamily:FONT,opacity:al }}>
+    <div style={{ display:"flex",gap:14 }}>
+      {tones.map(function(k) { return <div key={k} style={{ width:36,height:36,borderRadius:"50%",background:"radial-gradient(circle at 36% 36%,"+TONES[k].colors[0]+","+TONES[k].colors[1]+")",boxShadow:"0 0 28px "+TONES[k].primary+"66" }} />; })}
+    </div>
+    {tones.map(function(k) { return <div key={k} style={{ color:TONES[k].primary,fontSize:12,letterSpacing:"0.2em",fontWeight:200,opacity:0.7 }}>{TONES[k].name}</div>; })}
+  </div>;
 }
 
 function ToneResonanceMoment({ rgb, tone, onDone }) {
