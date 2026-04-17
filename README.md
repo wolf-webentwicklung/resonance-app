@@ -23,7 +23,10 @@ Run these SQL files in order in the Supabase SQL Editor:
 1. `supabase-schema.sql` — tables, RLS policies, core functions
 2. `supabase-migration.sql` — proposals, artwork reset, dissolve, realtime
 3. `supabase-migration-2.sql` — still-here, nudge, turn-based sending, RLS fix
-4. `supabase-cleanup.sql` — automatic inactive pair cleanup (requires pg_cron extension)
+4. `supabase-recovery.sql` — recovery token system
+5. `supabase-security-fixes.sql` — security hardening (RLS, RPCs, rate limits, discovery_mode column)
+6. `supabase-fixes-2.sql` — turn_nudge type, save_push_token RPC
+7. `supabase-cleanup.sql` — automatic inactive pair cleanup (requires pg_cron extension)
 
 For the cleanup migration: enable pg_cron first via Supabase Dashboard → Database → Extensions → pg_cron.
 
@@ -95,7 +98,10 @@ One person creates an invite (generates a 6-character code), the other enters it
 
 ### Account
 
-Everyone starts as a guest (anonymous, device-bound). In Settings, guests can secure their account with an email via magic link. Once secured, they can sign back in on any device from the Welcome screen.
+Everyone starts as a guest (anonymous, device-bound). In Settings, guests can:
+
+- **Secure with Email** — links a magic-link email to the account. Allows sign-in on any device from the Welcome screen.
+- **Recovery Code** — generates a 6-character code stored server-side. Use "recover my space" on the Welcome screen to transfer the account to a new device without email. Rate-limited to 5 attempts per hour.
 
 ---
 
@@ -186,7 +192,9 @@ Rare events triggered by specific conditions. Maximum one per reveal, 5-hour coo
 
 **Still Here**: When you have nothing to send and no pending trace, a presence dot appears at the bottom. Hold it for 2 seconds to send a soft pulse to your partner ("your person is here"). Maximum once every 4 hours.
 
-**Nudge**: When your sent trace has been undiscovered for 2+ hours, "send a gentle reminder" appears. One tap sends a notification to your partner ("your person is waiting"). Maximum once per undiscovered trace.
+**Nudge**: When your sent trace has been undiscovered for 2+ hours, "send a gentle reminder" appears. One tap sends a notification to your partner ("your person is waiting"). Maximum once per undiscovered trace. Uses event type `nudge` — separate cooldown from turn reminders.
+
+**Turn Reminder**: When it's your partner's turn and they haven't sent within the configured delay, "it's their turn · send a nudge" appears. Uses event type `turn_nudge` so its cooldown does not collide with the discovery-wait nudge.
 
 **Milestones**: Silent, one-time text overlays at trace counts 1, 10, 25, 50, 100 ("the first mark", "something is growing", etc.).
 
@@ -268,8 +276,11 @@ resona/
 │   ├── manifest.json            PWA manifest
 │   └── sw.js                    Service worker
 ├── supabase-schema.sql          Base schema
-├── supabase-migration.sql       Migration 1: proposals
+├── supabase-migration.sql       Migration 1: proposals, dissolve
 ├── supabase-migration-2.sql     Migration 2: events, turn-based, RLS fix
+├── supabase-recovery.sql        Migration 3: recovery token system
+├── supabase-security-fixes.sql  Migration 4: security hardening, RLS, rate limits
+├── supabase-fixes-2.sql         Migration 5: turn_nudge type, push token validation
 ├── supabase-cleanup.sql         Automatic inactive pair cleanup (pg_cron)
 ├── supabase/
 │   └── functions/
@@ -284,24 +295,34 @@ resona/
 
 | Table | Purpose |
 |-------|---------|
-| `users` | Auth rows, pair reference, push token |
-| `pairs` | Connections (invite code, status, timestamps) |
-| `traces` | Gestures with tone, position, signal type, discovery state |
-| `resonance_events` | Moments, still-here pulses, nudge notifications |
+| `users` | Auth rows, pair reference, push token, recovery token |
+| `pairs` | Connections (invite code nulled on join, status, timestamps) |
+| `traces` | Gestures with tone, position, signal type, discovery mode, discovery state |
+| `resonance_events` | Moments, still-here pulses, nudge (`nudge`), turn reminders (`turn_nudge`) |
 | `artwork_contributions` | Gesture paths contributing to shared artwork |
 | `pair_proposals` | Reunions, artwork reveals, fresh starts (proposal/response flow) |
+| `recovery_attempts` | Rate-limit log for recover_account (max 5/hour per caller) |
 
 ### Security
 
 - Row Level Security on all tables
-- Turn-based sending enforced server-side (`can_send_trace` function)
+- Turn-based sending enforced server-side (`can_send_trace` RPC)
 - Rate limit: 5 traces/day maximum
-- Invite codes expire after 24 hours
-- Artwork reset and dissolve run as security definer functions
-- Proposal RLS uses direct user lookup (no recursive subqueries)
+- Invite codes expire after 24 hours and are nulled on join (no reuse)
+- `pairs_select` restricted to pair members only — pending invite codes not enumerable
+- Direct `pairs_update` not permitted — all mutations go through SECURITY DEFINER RPCs
+- `sender_id` enforced as `auth.uid()` on traces, artwork, and events inserts
+- Trace updates restricted to receiver only (marking discovered)
+- Resonance events insert only via `create_resonance_event` RPC — server overwrites `sender_id`
+- Proposals: `proposed_by = auth.uid()` on insert; self-accept blocked in `respond_to_proposal` RPC
+- Recovery token: rate-limited to 5 attempts/hour per caller via `recovery_attempts` table
+- Push endpoint validated against domain allowlist before storing and before delivering
+- Send-push Edge Function verifies caller is a member of the target pair
+- Canvas broadcast channel name includes pair creation timestamp — opaque to non-members
+- Streak calculation uses local dates (not UTC) — no false breaks near midnight
 - Anonymous auth with optional email linking
 - Magic link sign-in with redirect URL validation
-- Publishable key safe with RLS enforcement
+- Publishable anon key is safe with RLS enforcement
 
 ### Constraints & Limits
 
