@@ -26,7 +26,8 @@ Run these SQL files in order in the Supabase SQL Editor:
 4. `supabase-recovery.sql` — recovery token system
 5. `supabase-security-fixes.sql` — security hardening (RLS, RPCs, rate limits, discovery_mode column)
 6. `supabase-fixes-2.sql` — turn_nudge type, save_push_token RPC
-7. `supabase-cleanup.sql` — automatic inactive pair cleanup (requires pg_cron extension)
+7. `supabase-fixes-3.sql` — fix emotional_tone constraint (all 10 tones), fix tone_resonance event type
+8. `supabase-cleanup.sql` — automatic inactive pair cleanup (requires pg_cron extension)
 
 For the cleanup migration: enable pg_cron first via Supabase Dashboard → Database → Extensions → pg_cron.
 

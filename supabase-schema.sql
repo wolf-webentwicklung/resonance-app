@@ -42,7 +42,7 @@ create table public.traces (
   sender_id uuid not null references public.users(id),
   receiver_id uuid not null references public.users(id),
   gesture_data jsonb not null,
-  emotional_tone text not null check (emotional_tone in ('nearness','longing','tension','warmth','playfulness')),
+  emotional_tone text not null check (emotional_tone in ('nearness','longing','tension','warmth','playfulness','ruhe','hingabe','trauer','staunen','begehren')),
   signal_type text not null check (signal_type in ('shimmer','pulse','drift','flicker','density','wave')),
   reveal_position jsonb not null,
   search_radius float default 0.08,

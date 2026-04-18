@@ -12,7 +12,7 @@ ALTER TABLE public.resonance_events
   ADD CONSTRAINT resonance_events_type_check
   CHECK (type IN (
     'twin_connection', 'trace_convergence', 'amplified_reveal',
-    'still_here', 'nudge', 'turn_nudge'
+    'tone_resonance', 'still_here', 'nudge', 'turn_nudge'
   ));
 
 -- ═══ 2. S14: save_push_token RPC — validates endpoint before storing ═══
