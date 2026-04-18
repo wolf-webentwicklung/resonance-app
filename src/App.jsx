@@ -44,60 +44,67 @@ function Welcome({ onStart, onSignIn, onRecover }) {
   var cvRef = useRef(null);
   useEffect(function() { setTimeout(function() { sa(1); }, 300); }, []);
 
-  // Space-like background: vivid glowing traces + shimmer particles + breathing glow
+  // Space-like background: glowing traces + shimmer + breathing glow (performance-optimised)
   useEffect(function() {
     var c = cvRef.current; if (!c) return;
-    var ctx = c.getContext("2d"), dpr = window.devicePixelRatio || 1;
+    var ctx = c.getContext("2d"), dpr = Math.min(window.devicePixelRatio || 1, 2);
     var rect = c.getBoundingClientRect();
     c.width = rect.width * dpr; c.height = rect.height * dpr; ctx.scale(dpr, dpr);
-    var w = rect.width, h = rect.height, af;
+    var w = rect.width, h = rect.height, af, paused = false;
     var tones = [
       { rgb: "212,165,116" }, { rgb: "107,82,196" }, { rgb: "224,122,95" },
-      { rgb: "0,180,216" }, { rgb: "184,122,74" }, { rgb: "139,167,184" },
+      { rgb: "0,180,216" }, { rgb: "184,122,74" },
     ];
+    // 5 traces, 35 pts each — keeps GPU load low on mobile
     var paths = [];
-    for (var p = 0; p < 7; p++) {
+    for (var p = 0; p < 5; p++) {
       var pts = [];
-      var pcx = 0.12 + Math.random() * 0.76, pcy = 0.1 + Math.random() * 0.8;
-      var startAngle = Math.random() * Math.PI * 2;
-      for (var i = 0; i < 50; i++) {
-        var prog = i / 50;
-        var angle = startAngle + prog * Math.PI * (1.3 + (p % 3) * 0.5);
-        var r = 0.018 + prog * 0.17 + Math.sin(prog * 5 + p * 1.3) * 0.025;
+      var pcx = 0.15 + Math.random() * 0.7, pcy = 0.12 + Math.random() * 0.76;
+      var sa = Math.random() * Math.PI * 2;
+      for (var i = 0; i < 35; i++) {
+        var prog = i / 35;
+        var angle = sa + prog * Math.PI * (1.2 + (p % 3) * 0.5);
+        var r = 0.02 + prog * 0.16 + Math.sin(prog * 5 + p * 1.1) * 0.022;
         pts.push({ x: pcx + Math.cos(angle) * r, y: pcy + Math.sin(angle) * r * 0.72 });
       }
-      paths.push({ pts: pts, tone: tones[p % tones.length], delay: p * 1.8, speed: 0.005 + (p % 3) * 0.003, glowW: 12 + (p % 4) * 5 });
+      paths.push({ pts: pts, tone: tones[p % tones.length], delay: p * 2.2, speed: 0.005 + (p % 3) * 0.003, glowW: 12 + (p % 3) * 4 });
     }
+    // 18 shimmer particles — lightweight
     var particles = [];
-    for (var q = 0; q < 50; q++) {
-      particles.push({ x: Math.random(), y: Math.random(), tone: tones[q % tones.length], phase: Math.random() * Math.PI * 2, speed: 0.25 + Math.random() * 0.45, size: 0.8 + Math.random() * 1.8 });
+    for (var q = 0; q < 18; q++) {
+      particles.push({ x: Math.random(), y: Math.random(), tone: tones[q % tones.length], phase: Math.random() * Math.PI * 2, speed: 0.28 + Math.random() * 0.4, size: 1 + Math.random() * 1.5 });
     }
+
+    // Pause animation when tab not visible — saves battery/GPU
+    function onVisibility() { paused = document.hidden; if (!paused) af = requestAnimationFrame(draw); }
+    document.addEventListener("visibilitychange", onVisibility);
 
     var start = Date.now();
     function draw() {
+      if (paused) return;
       var t = (Date.now() - start) / 1000;
       ctx.clearRect(0, 0, w, h);
 
-      // Breathing center glow
+      // Breathing center glow (single gradient, low cost)
       var breath = 0.5 + Math.sin(t * 0.55) * 0.5;
-      ctx.globalAlpha = breath * 0.05;
+      ctx.globalAlpha = breath * 0.045;
       ctx.globalCompositeOperation = "screen";
-      var cg = ctx.createRadialGradient(w * 0.5, h * 0.46, 0, w * 0.5, h * 0.46, Math.min(w, h) * 0.55);
+      var cg = ctx.createRadialGradient(w * 0.5, h * 0.46, 0, w * 0.5, h * 0.46, Math.min(w, h) * 0.52);
       cg.addColorStop(0, "rgba(212,165,116,0.7)");
-      cg.addColorStop(0.5, "rgba(107,82,196,0.35)");
+      cg.addColorStop(0.5, "rgba(107,82,196,0.3)");
       cg.addColorStop(1, "transparent");
       ctx.fillStyle = cg; ctx.fillRect(0, 0, w, h);
 
-      // Shimmer particles
+      // Shimmer particles (batched per tone to reduce state changes)
+      ctx.globalCompositeOperation = "screen";
       particles.forEach(function(pt) {
         var pulse = 0.5 + Math.sin(t * pt.speed + pt.phase) * 0.5;
-        ctx.globalAlpha = pulse * 0.2;
-        ctx.globalCompositeOperation = "screen";
+        ctx.globalAlpha = pulse * 0.18;
         ctx.fillStyle = "rgba(" + pt.tone.rgb + ",0.9)";
         ctx.beginPath(); ctx.arc(pt.x * w, pt.y * h, pt.size, 0, Math.PI * 2); ctx.fill();
       });
 
-      // Traces
+      // Traces (glow + core in two passes per trace)
       paths.forEach(function(path) {
         var elapsed = t - path.delay;
         if (elapsed < 0) return;
@@ -109,17 +116,20 @@ function Welcome({ onStart, onSignIn, onRecover }) {
         if (alpha < 0.01) return;
         var count = Math.floor(path.pts.length * drawProg);
         if (count < 2) return;
-        // Outer glow
-        ctx.globalAlpha = alpha * 0.25;
         ctx.globalCompositeOperation = "screen";
-        ctx.beginPath(); ctx.strokeStyle = "rgba(" + path.tone.rgb + ",0.6)";
-        ctx.lineWidth = path.glowW; ctx.lineCap = "round"; ctx.lineJoin = "round";
+        ctx.lineCap = "round"; ctx.lineJoin = "round";
+        // Glow pass
+        ctx.globalAlpha = alpha * 0.22;
+        ctx.strokeStyle = "rgba(" + path.tone.rgb + ",0.6)";
+        ctx.lineWidth = path.glowW;
+        ctx.beginPath();
         for (var i = 0; i < count; i++) { var pt = path.pts[i]; i === 0 ? ctx.moveTo(pt.x * w, pt.y * h) : ctx.lineTo(pt.x * w, pt.y * h); }
         ctx.stroke();
-        // Core line
-        ctx.globalAlpha = alpha * 0.5;
-        ctx.beginPath(); ctx.strokeStyle = "rgba(" + path.tone.rgb + ",1)";
+        // Core pass
+        ctx.globalAlpha = alpha * 0.48;
+        ctx.strokeStyle = "rgba(" + path.tone.rgb + ",1)";
         ctx.lineWidth = 2;
+        ctx.beginPath();
         for (var i2 = 0; i2 < count; i2++) { var pt2 = path.pts[i2]; i2 === 0 ? ctx.moveTo(pt2.x * w, pt2.y * h) : ctx.lineTo(pt2.x * w, pt2.y * h); }
         ctx.stroke();
       });
@@ -128,7 +138,7 @@ function Welcome({ onStart, onSignIn, onRecover }) {
       af = requestAnimationFrame(draw);
     }
     af = requestAnimationFrame(draw);
-    return function() { cancelAnimationFrame(af); };
+    return function() { cancelAnimationFrame(af); document.removeEventListener("visibilitychange", onVisibility); };
   }, []);
 
   return (
@@ -147,7 +157,7 @@ function Welcome({ onStart, onSignIn, onRecover }) {
         <span style={{ color:"rgba(255,255,255,0.52)",fontSize:12,letterSpacing:"0.1em",fontWeight:200 }}>already have an account?</span>
       </div>
       <div onClick={function(ev) { ev.stopPropagation(); onRecover(); }} style={{ position:"relative",zIndex:1,marginTop:8,cursor:"pointer",padding:"6px 16px" }}>
-        <span style={{ color:"rgba(255,255,255,0.3)",fontSize:11,letterSpacing:"0.1em",fontWeight:200 }}>recover my space</span>
+        <span style={{ color:"rgba(255,255,255,0.45)",fontSize:12,letterSpacing:"0.1em",fontWeight:200 }}>recover my space</span>
       </div>
     </div>
   );
@@ -2106,48 +2116,48 @@ function ResonanceSpace({ user, pair, onDissolve }) {
 
           {/* Header row */}
           <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20 }}>
-            <div style={{ color:"rgba(255,255,255,0.35)",fontSize:10,letterSpacing:"0.32em",fontWeight:300 }}>SETTINGS</div>
-            <div onClick={function() { setShowSettings(false); }} style={{ cursor:"pointer",color:"rgba(255,255,255,0.2)",fontSize:22,lineHeight:1,padding:"0 4px" }}>{"\u00D7"}</div>
+            <div style={{ color:"rgba(255,255,255,0.5)",fontSize:11,letterSpacing:"0.32em",fontWeight:300 }}>SETTINGS</div>
+            <div onClick={function() { setShowSettings(false); }} style={{ cursor:"pointer",color:"rgba(255,255,255,0.4)",fontSize:22,lineHeight:1,padding:"0 4px" }}>{"\u00D7"}</div>
           </div>
 
           {/* Connection status */}
-          <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",paddingBottom:20,marginBottom:4,borderBottom:"1px solid rgba(255,255,255,0.06)" }}>
-            <div style={{ color:"rgba(255,255,255,0.4)",fontSize:13,letterSpacing:"0.05em",fontWeight:200 }}>
+          <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",paddingBottom:20,marginBottom:4,borderBottom:"1px solid rgba(255,255,255,0.08)" }}>
+            <div style={{ color:"rgba(255,255,255,0.6)",fontSize:13,letterSpacing:"0.05em",fontWeight:200 }}>
               Connected{dayCount > 1 ? " · day " + dayCount : ""}
-              {streakData.current > 1 ? <span style={{ marginLeft:8,color:"rgba(212,165,116,0.45)",fontSize:12,fontWeight:200 }}>· {streakData.current}-day streak</span> : null}
+              {streakData.current > 1 ? <span style={{ marginLeft:8,color:"rgba(212,165,116,0.65)",fontSize:12,fontWeight:200 }}>· {streakData.current}-day streak</span> : null}
             </div>
             {partnerHere ? <div style={{ display:"flex",alignItems:"center",gap:6 }}>
-              <div style={{ width:5,height:5,borderRadius:"50%",background:"rgba(212,165,116,0.6)",boxShadow:"0 0 8px rgba(212,165,116,0.3)" }} />
-              <span style={{ color:"rgba(212,165,116,0.45)",fontSize:12,fontWeight:200 }}>here now</span>
+              <div style={{ width:5,height:5,borderRadius:"50%",background:"rgba(212,165,116,0.7)",boxShadow:"0 0 8px rgba(212,165,116,0.3)" }} />
+              <span style={{ color:"rgba(212,165,116,0.65)",fontSize:12,fontWeight:200 }}>here now</span>
             </div> : null}
           </div>
 
           {/* ── ACCOUNT ── */}
           <div style={{ paddingTop:20,marginBottom:4 }}>
-            <div style={{ fontSize:10,letterSpacing:"0.28em",color:"rgba(255,255,255,0.18)",fontWeight:300,marginBottom:14 }}>ACCOUNT</div>
+            <div style={{ fontSize:11,letterSpacing:"0.28em",color:"rgba(255,255,255,0.32)",fontWeight:300,marginBottom:14 }}>ACCOUNT</div>
             {guest ? (
               <div>
                 <div style={{ display:"flex",alignItems:"center",gap:8,marginBottom:6 }}>
-                  <div style={{ width:6,height:6,borderRadius:"50%",background:"rgba(224,122,95,0.5)",flexShrink:0 }} />
-                  <span style={{ color:"rgba(224,122,95,0.65)",fontSize:14,fontWeight:300 }}>Guest Mode</span>
+                  <div style={{ width:6,height:6,borderRadius:"50%",background:"rgba(224,122,95,0.6)",flexShrink:0 }} />
+                  <span style={{ color:"rgba(224,122,95,0.8)",fontSize:14,fontWeight:300 }}>Guest Mode</span>
                 </div>
-                <div style={{ color:"rgba(255,255,255,0.28)",fontSize:12,fontWeight:200,lineHeight:1.7,marginBottom:16,paddingLeft:14 }}>Your account is tied to this device. Clear browser data and you lose access.</div>
-                <div onClick={function() { setShowSettings(false); setShowEmail(true); }} style={{ color:"rgba(212,165,116,0.75)",fontSize:14,fontWeight:300,letterSpacing:"0.06em",cursor:"pointer",marginBottom:20 }}>Secure with Email</div>
-                <div style={{ background:"rgba(255,255,255,0.03)",borderRadius:14,padding:"14px 16px",border:"1px solid rgba(255,255,255,0.05)" }}>
-                  <div style={{ color:"rgba(255,255,255,0.25)",fontSize:10,letterSpacing:"0.25em",fontWeight:200,marginBottom:10 }}>RECOVERY CODE</div>
+                <div style={{ color:"rgba(255,255,255,0.48)",fontSize:13,fontWeight:200,lineHeight:1.7,marginBottom:16,paddingLeft:14 }}>Your account is tied to this device. Clear browser data and you lose access.</div>
+                <div onClick={function() { setShowSettings(false); setShowEmail(true); }} style={{ color:"rgba(212,165,116,0.85)",fontSize:14,fontWeight:300,letterSpacing:"0.06em",cursor:"pointer",marginBottom:20 }}>Secure with Email</div>
+                <div style={{ background:"rgba(255,255,255,0.04)",borderRadius:14,padding:"14px 16px",border:"1px solid rgba(255,255,255,0.07)" }}>
+                  <div style={{ color:"rgba(255,255,255,0.38)",fontSize:11,letterSpacing:"0.25em",fontWeight:200,marginBottom:10 }}>RECOVERY CODE</div>
                   {recoveryToken === null ? (
-                    <div style={{ color:"rgba(255,255,255,0.22)",fontSize:12,fontWeight:200 }}>loading…</div>
+                    <div style={{ color:"rgba(255,255,255,0.42)",fontSize:12,fontWeight:200 }}>loading…</div>
                   ) : recoveryToken ? (
                     <div>
                       <div style={{ display:"flex",alignItems:"center",gap:12,marginBottom:8 }}>
-                        <span style={{ color:"rgba(212,165,116,0.85)",fontSize:22,fontWeight:300,letterSpacing:"0.35em" }}>{recoveryToken}</span>
-                        <div onClick={function() { try { navigator.clipboard.writeText(recoveryToken); } catch(e) {} }} style={{ cursor:"pointer",padding:"4px 10px",borderRadius:8,border:"1px solid rgba(255,255,255,0.08)",color:"rgba(255,255,255,0.32)",fontSize:11,fontWeight:200 }}>copy</div>
+                        <span style={{ color:"rgba(212,165,116,0.9)",fontSize:22,fontWeight:300,letterSpacing:"0.35em" }}>{recoveryToken}</span>
+                        <div onClick={function() { try { navigator.clipboard.writeText(recoveryToken); } catch(e) {} }} style={{ cursor:"pointer",padding:"4px 10px",borderRadius:8,border:"1px solid rgba(255,255,255,0.1)",color:"rgba(255,255,255,0.5)",fontSize:11,fontWeight:200 }}>copy</div>
                       </div>
-                      <div style={{ color:"rgba(255,255,255,0.22)",fontSize:11,fontWeight:200,lineHeight:1.7 }}>Write this down. Use it on Welcome → "recover my space" if you lose access.</div>
+                      <div style={{ color:"rgba(255,255,255,0.42)",fontSize:12,fontWeight:200,lineHeight:1.7 }}>Write this down. Use it on Welcome → "recover my space" if you lose access.</div>
                     </div>
                   ) : (
                     <div>
-                      <div style={{ color:"rgba(255,255,255,0.28)",fontSize:12,fontWeight:200,lineHeight:1.7,marginBottom:10 }}>Generate a code to recover your space if you lose access to this device.</div>
+                      <div style={{ color:"rgba(255,255,255,0.48)",fontSize:12,fontWeight:200,lineHeight:1.7,marginBottom:10 }}>Generate a code to recover your space if you lose access to this device.</div>
                       <div onClick={async function() {
                         setGeneratingRecovToken(true);
                         try {
@@ -2155,7 +2165,7 @@ function ResonanceSpace({ user, pair, onDissolve }) {
                           setRecoveryToken(tok);
                         } catch(e) { console.error("Recovery token error:", e); }
                         setGeneratingRecovToken(false);
-                      }} style={{ cursor:"pointer",color:"rgba(212,165,116,0.7)",fontSize:13,fontWeight:300,letterSpacing:"0.06em" }}>
+                      }} style={{ cursor:"pointer",color:"rgba(212,165,116,0.82)",fontSize:13,fontWeight:300,letterSpacing:"0.06em" }}>
                         {generatingRecovToken ? "generating…" : "Generate Recovery Code"}
                       </div>
                     </div>
@@ -2164,66 +2174,66 @@ function ResonanceSpace({ user, pair, onDissolve }) {
               </div>
             ) : (
               <div style={{ display:"flex",alignItems:"center",gap:8 }}>
-                <div style={{ width:5,height:5,borderRadius:"50%",background:"rgba(255,255,255,0.18)",flexShrink:0 }} />
-                <span style={{ color:"rgba(255,255,255,0.42)",fontSize:14,fontWeight:200 }}>{user.email}</span>
+                <div style={{ width:5,height:5,borderRadius:"50%",background:"rgba(255,255,255,0.28)",flexShrink:0 }} />
+                <span style={{ color:"rgba(255,255,255,0.62)",fontSize:14,fontWeight:200 }}>{user.email}</span>
               </div>
             )}
           </div>
 
           {/* ── YOUR CONNECTION ── */}
-          <div style={{ marginTop:28,paddingTop:20,borderTop:"1px solid rgba(255,255,255,0.06)" }}>
-            <div style={{ fontSize:10,letterSpacing:"0.28em",color:"rgba(255,255,255,0.18)",fontWeight:300,marginBottom:18 }}>YOUR CONNECTION</div>
+          <div style={{ marginTop:28,paddingTop:20,borderTop:"1px solid rgba(255,255,255,0.08)" }}>
+            <div style={{ fontSize:11,letterSpacing:"0.28em",color:"rgba(255,255,255,0.32)",fontWeight:300,marginBottom:18 }}>YOUR CONNECTION</div>
 
             {/* Reunion */}
             <div style={{ marginBottom:contribs.length > 0 ? 22 : 0 }}>
               {reunion && reunion.type === "reunion" && reunion.status === "accepted" ? (
                 <div>
-                  <div style={{ color:"rgba(212,165,116,0.75)",fontSize:14,fontWeight:300,letterSpacing:"0.07em",marginBottom:4 }}>
+                  <div style={{ color:"rgba(212,165,116,0.85)",fontSize:14,fontWeight:300,letterSpacing:"0.07em",marginBottom:4 }}>
                     Reunion · {new Date(reunion.proposed_date + "T00:00:00").toLocaleDateString(undefined, { day:"numeric",month:"long" })}
                   </div>
-                  <div style={{ color:"rgba(255,255,255,0.25)",fontSize:12,fontWeight:200,marginBottom:8 }}>your date is set · artwork will be waiting</div>
-                  <div onClick={function() { respondToProposal(reunion.id, false).then(function() { setReunion(null); setShowSettings(false); setReunionUI("propose"); }).catch(function(){}); }} style={{ color:"rgba(255,255,255,0.28)",fontSize:11,fontWeight:200,cursor:"pointer",letterSpacing:"0.05em" }}>change date</div>
+                  <div style={{ color:"rgba(255,255,255,0.42)",fontSize:12,fontWeight:200,marginBottom:8 }}>your date is set · artwork will be waiting</div>
+                  <div onClick={function() { respondToProposal(reunion.id, false).then(function() { setReunion(null); setShowSettings(false); setReunionUI("propose"); }).catch(function(){}); }} style={{ color:"rgba(255,255,255,0.45)",fontSize:12,fontWeight:200,cursor:"pointer",letterSpacing:"0.05em" }}>change date</div>
                 </div>
               ) : reunion && reunion.type === "reunion" && reunion.status === "pending" && reunion.proposed_by === user.id ? (
                 <div>
-                  <div style={{ color:"rgba(255,255,255,0.42)",fontSize:14,fontWeight:200,letterSpacing:"0.05em",marginBottom:4 }}>waiting for your person to accept…</div>
-                  <div style={{ color:"rgba(255,255,255,0.22)",fontSize:12,fontWeight:200,marginBottom:8 }}>they'll be notified of your proposed date</div>
-                  <div onClick={function() { respondToProposal(reunion.id, false).then(function() { setReunion(null); }).catch(function(){}); }} style={{ color:"rgba(255,255,255,0.25)",fontSize:11,fontWeight:200,cursor:"pointer" }}>cancel</div>
+                  <div style={{ color:"rgba(255,255,255,0.6)",fontSize:14,fontWeight:200,letterSpacing:"0.05em",marginBottom:4 }}>waiting for your person to accept…</div>
+                  <div style={{ color:"rgba(255,255,255,0.42)",fontSize:12,fontWeight:200,marginBottom:8 }}>they'll be notified of your proposed date</div>
+                  <div onClick={function() { respondToProposal(reunion.id, false).then(function() { setReunion(null); }).catch(function(){}); }} style={{ color:"rgba(255,255,255,0.45)",fontSize:12,fontWeight:200,cursor:"pointer" }}>cancel</div>
                 </div>
               ) : (
                 <div onClick={function() { setShowSettings(false); setReunionUI("propose"); }} style={{ cursor:"pointer" }}>
-                  <div style={{ color:"rgba(212,165,116,0.75)",fontSize:14,fontWeight:300,letterSpacing:"0.07em",marginBottom:4 }}>Plan a Reunion</div>
-                  <div style={{ color:"rgba(255,255,255,0.25)",fontSize:12,fontWeight:200 }}>set a date to meet · reveal your artwork together</div>
+                  <div style={{ color:"rgba(212,165,116,0.85)",fontSize:14,fontWeight:300,letterSpacing:"0.07em",marginBottom:4 }}>Plan a Reunion</div>
+                  <div style={{ color:"rgba(255,255,255,0.42)",fontSize:12,fontWeight:200 }}>set a date to meet · reveal your artwork together</div>
                 </div>
               )}
             </div>
 
             {/* Reveal Artwork */}
             {contribs.length > 0 ? <div onClick={function() { setShowSettings(false); setReunionUI("confirm_reveal"); }} style={{ cursor:"pointer" }}>
-              <div style={{ color:"rgba(212,165,116,0.75)",fontSize:14,fontWeight:300,letterSpacing:"0.07em",marginBottom:4 }}>Reveal Artwork</div>
-              <div style={{ color:"rgba(255,255,255,0.25)",fontSize:12,fontWeight:200 }}>see what you created together</div>
+              <div style={{ color:"rgba(212,165,116,0.85)",fontSize:14,fontWeight:300,letterSpacing:"0.07em",marginBottom:4 }}>Reveal Artwork</div>
+              <div style={{ color:"rgba(255,255,255,0.42)",fontSize:12,fontWeight:200 }}>see what you created together</div>
             </div> : null}
           </div>
 
           {/* ── MANAGE ── */}
-          <div style={{ marginTop:28,paddingTop:20,borderTop:"1px solid rgba(255,255,255,0.06)" }}>
-            <div style={{ fontSize:10,letterSpacing:"0.28em",color:"rgba(255,255,255,0.18)",fontWeight:300,marginBottom:18 }}>MANAGE</div>
+          <div style={{ marginTop:28,paddingTop:20,borderTop:"1px solid rgba(255,255,255,0.08)" }}>
+            <div style={{ fontSize:11,letterSpacing:"0.28em",color:"rgba(255,255,255,0.32)",fontWeight:300,marginBottom:18 }}>MANAGE</div>
             {contribs.length > 0 ? <div onClick={function() { setShowSettings(false); setReunionUI("confirm_reset"); }} style={{ cursor:"pointer",marginBottom:22 }}>
-              <div style={{ color:"rgba(212,165,116,0.38)",fontSize:14,fontWeight:200,letterSpacing:"0.07em",marginBottom:4 }}>Start Fresh</div>
-              <div style={{ color:"rgba(255,255,255,0.22)",fontSize:12,fontWeight:200 }}>both need to agree · artwork will be cleared</div>
+              <div style={{ color:"rgba(212,165,116,0.52)",fontSize:14,fontWeight:200,letterSpacing:"0.07em",marginBottom:4 }}>Start Fresh</div>
+              <div style={{ color:"rgba(255,255,255,0.4)",fontSize:12,fontWeight:200 }}>both need to agree · artwork will be cleared</div>
             </div> : null}
             <div onClick={function() { if (confirm("Dissolve this connection? This cannot be undone.")) { setShowSettings(false); onDissolve(); } }} style={{ cursor:"pointer" }}>
-              <div style={{ color:"rgba(196,30,58,0.6)",fontSize:14,fontWeight:200,letterSpacing:"0.07em",marginBottom:4 }}>Dissolve Connection</div>
-              <div style={{ color:"rgba(255,255,255,0.22)",fontSize:12,fontWeight:200 }}>end this connection permanently</div>
+              <div style={{ color:"rgba(196,30,58,0.72)",fontSize:14,fontWeight:200,letterSpacing:"0.07em",marginBottom:4 }}>Dissolve Connection</div>
+              <div style={{ color:"rgba(255,255,255,0.4)",fontSize:12,fontWeight:200 }}>end this connection permanently</div>
             </div>
           </div>
 
           {/* ── APP ── */}
-          <div style={{ marginTop:28,paddingTop:20,borderTop:"1px solid rgba(255,255,255,0.06)" }}>
-            <div style={{ fontSize:10,letterSpacing:"0.28em",color:"rgba(255,255,255,0.18)",fontWeight:300,marginBottom:14 }}>APP</div>
+          <div style={{ marginTop:28,paddingTop:20,borderTop:"1px solid rgba(255,255,255,0.08)" }}>
+            <div style={{ fontSize:11,letterSpacing:"0.28em",color:"rgba(255,255,255,0.32)",fontWeight:300,marginBottom:14 }}>APP</div>
             <div onClick={function() { window.location.reload(); }} style={{ cursor:"pointer" }}>
-              <div style={{ color:"rgba(255,255,255,0.25)",fontSize:13,fontWeight:200,letterSpacing:"0.07em",marginBottom:4 }}>Reload App</div>
-              <div style={{ color:"rgba(255,255,255,0.15)",fontSize:11,fontWeight:200 }}>if something feels stuck</div>
+              <div style={{ color:"rgba(255,255,255,0.4)",fontSize:13,fontWeight:200,letterSpacing:"0.07em",marginBottom:4 }}>Reload App</div>
+              <div style={{ color:"rgba(255,255,255,0.28)",fontSize:11,fontWeight:200 }}>if something feels stuck</div>
             </div>
           </div>
 
@@ -2589,16 +2599,16 @@ function InstallPrompt({ traceCount, user, guest, onOpenEmail }) {
             When you add Resona to your home screen, it opens as a separate app. Without a saved account, your space and pairing won't carry over.
           </div>
           {recTok === null ? (
-            <div style={{ color:"rgba(255,255,255,0.3)",fontSize:12,marginBottom:20 }}>loading…</div>
+            <div style={{ color:"rgba(255,255,255,0.48)",fontSize:12,marginBottom:20 }}>loading…</div>
           ) : recTok ? (
             <div style={{ background:"rgba(212,165,116,0.06)",border:"1px solid rgba(212,165,116,0.15)",borderRadius:12,padding:"12px 16px",marginBottom:20 }}>
-              <div style={{ color:"rgba(255,255,255,0.4)",fontSize:11,letterSpacing:"0.1em",marginBottom:6 }}>YOUR RECOVERY CODE</div>
-              <div style={{ color:"rgba(212,165,116,0.85)",fontSize:22,fontWeight:300,letterSpacing:"0.35em",marginBottom:8 }}>{recTok}</div>
-              <div style={{ color:"rgba(255,255,255,0.35)",fontSize:11,fontWeight:200,lineHeight:1.6 }}>Write this down — you can use it to recover your space if you lose access.</div>
+              <div style={{ color:"rgba(255,255,255,0.5)",fontSize:11,letterSpacing:"0.1em",marginBottom:6 }}>YOUR RECOVERY CODE</div>
+              <div style={{ color:"rgba(212,165,116,0.9)",fontSize:22,fontWeight:300,letterSpacing:"0.35em",marginBottom:8 }}>{recTok}</div>
+              <div style={{ color:"rgba(255,255,255,0.48)",fontSize:12,fontWeight:200,lineHeight:1.6 }}>Write this down — you can use it to recover your space if you lose access.</div>
             </div>
           ) : (
             <div style={{ marginBottom:20 }}>
-              <div style={{ color:"rgba(255,255,255,0.4)",fontSize:12,fontWeight:200,lineHeight:1.7,marginBottom:12 }}>Save a recovery code or link your email first.</div>
+              <div style={{ color:"rgba(255,255,255,0.52)",fontSize:12,fontWeight:200,lineHeight:1.7,marginBottom:12 }}>Save a recovery code or link your email first.</div>
               <div onClick={async function() {
                 if (!user) return;
                 setGenning(true);
@@ -2607,8 +2617,8 @@ function InstallPrompt({ traceCount, user, guest, onOpenEmail }) {
               }} style={{ cursor:"pointer",color:"rgba(212,165,116,0.7)",fontSize:13,fontWeight:300,marginBottom:10,letterSpacing:"0.05em" }}>
                 {genning ? "generating…" : "Generate Recovery Code"}
               </div>
-              <div style={{ color:"rgba(255,255,255,0.25)",fontSize:11,fontWeight:200 }}>or</div>
-              <div onClick={function() { dismiss(); if (onOpenEmail) onOpenEmail(); }} style={{ cursor:"pointer",color:"rgba(212,165,116,0.5)",fontSize:12,fontWeight:200,marginTop:6,letterSpacing:"0.05em" }}>Link Email Instead</div>
+              <div style={{ color:"rgba(255,255,255,0.4)",fontSize:11,fontWeight:200 }}>or</div>
+              <div onClick={function() { dismiss(); if (onOpenEmail) onOpenEmail(); }} style={{ cursor:"pointer",color:"rgba(212,165,116,0.7)",fontSize:12,fontWeight:200,marginTop:6,letterSpacing:"0.05em" }}>Link Email Instead</div>
             </div>
           )}
           <div style={{ display:"flex",gap:12,justifyContent:"center" }}>
@@ -3491,7 +3501,7 @@ function RecoveryUI({ user, onDone, onBack }) {
         <div style={{ color:"rgba(255,255,255,0.57)",fontSize:13,letterSpacing:"0.3em",fontWeight:200 }}>RECOVER MY SPACE</div>
         <div style={{ color:"rgba(255,255,255,0.52)",fontSize:13,fontWeight:200,lineHeight:1.8,textAlign:"center" }}>
           Enter your 6-character recovery code.<br/>
-          <span style={{ color:"rgba(255,255,255,0.35)",fontSize:12 }}>You saved this in Settings before.</span>
+          <span style={{ color:"rgba(255,255,255,0.48)",fontSize:12 }}>You saved this in Settings before.</span>
         </div>
         {err ? <div style={{ color:"rgba(196,30,58,0.6)",fontSize:12,fontWeight:200,textAlign:"center" }}>{err}</div> : null}
         <input
@@ -3503,7 +3513,7 @@ function RecoveryUI({ user, onDone, onBack }) {
         />
         <div onClick={submit} style={{ padding:"14px 44px",borderRadius:24,border:"1px solid rgba(212,165,116,0.2)",background:token.length===6?"rgba(212,165,116,0.06)":"transparent",cursor:token.length===6?"pointer":"default",color:token.length===6?"rgba(212,165,116,0.7)":"rgba(255,255,255,0.2)",fontSize:13,letterSpacing:"0.15em",fontWeight:300 }}>RECOVER</div>
         <div onClick={onBack} style={{ cursor:"pointer",padding:"8px 16px",marginTop:4 }}>
-          <span style={{ color:"rgba(255,255,255,0.35)",fontSize:12,letterSpacing:"0.1em",fontWeight:200 }}>back</span>
+          <span style={{ color:"rgba(255,255,255,0.5)",fontSize:12,letterSpacing:"0.1em",fontWeight:200 }}>back</span>
         </div>
       </div>
     )}
