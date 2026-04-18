@@ -1997,7 +1997,7 @@ function ResonanceSpace({ user, pair, onDissolve }) {
       </div> : null}
       {showSettings ? <div style={{ position:"absolute",inset:0,zIndex:48,display:"flex",alignItems:"flex-end",justifyContent:"center" }} onClick={function() { setShowSettings(false); }}>
         <div style={{ position:"absolute",inset:0,background:"rgba(0,0,0,0.5)" }} />
-        <div onClick={function(ev) { ev.stopPropagation(); }} style={{ position:"relative",width:"100%",maxWidth:400,background:"#111118",borderRadius:"20px 20px 0 0",padding:"28px 24px 40px",fontFamily:FONT,maxHeight:"80vh",overflowY:"scroll",WebkitOverflowScrolling:"touch" }}>
+        <div onClick={function(ev) { ev.stopPropagation(); }} style={{ position:"relative",width:"100%",maxWidth:400,background:"#111118",borderRadius:"20px 20px 0 0",paddingTop:28,paddingLeft:24,paddingRight:24,paddingBottom:"calc(40px + env(safe-area-inset-bottom))",fontFamily:FONT,maxHeight:"calc(85vh - env(safe-area-inset-top))",overflowY:"scroll",WebkitOverflowScrolling:"touch" }}>
           <div style={{ width:32,height:3,borderRadius:2,background:"rgba(255,255,255,0.15)",margin:"0 auto 16px" }} />
           <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20 }}>
             <div style={{ color:"rgba(255,255,255,0.52)",fontSize:13,letterSpacing:"0.25em",fontWeight:200 }}>SETTINGS</div>
