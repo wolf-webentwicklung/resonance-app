@@ -29,3 +29,32 @@ ALTER TABLE public.resonance_events
     'twin_connection', 'trace_convergence', 'amplified_reveal',
     'tone_resonance', 'still_here', 'nudge', 'turn_nudge'
   ));
+
+-- ═══ 3. Re-apply traces_insert RLS policy (safety) ═══
+-- If supabase-security-fixes.sql ran with errors and the DROP succeeded but
+-- CREATE POLICY failed, there is NO traces_insert policy → all INSERTs denied
+-- by default (RLS on, no policy = deny). Re-applying idempotently fixes this.
+DROP POLICY IF EXISTS "traces_insert" ON public.traces;
+CREATE POLICY "traces_insert" ON public.traces FOR INSERT WITH CHECK (
+  traces.sender_id = auth.uid()
+  AND traces.pair_id IN (
+    SELECT p.id FROM public.pairs p
+    WHERE p.user_a_id = auth.uid() OR p.user_b_id = auth.uid()
+  )
+);
+
+-- ═══ 4. Re-apply traces_update RLS policy (safety) ═══
+DROP POLICY IF EXISTS "traces_update" ON public.traces;
+CREATE POLICY "traces_update" ON public.traces FOR UPDATE USING (
+  traces.receiver_id = auth.uid()
+  AND traces.pair_id IN (
+    SELECT p.id FROM public.pairs p
+    WHERE p.user_a_id = auth.uid() OR p.user_b_id = auth.uid()
+  )
+);
+
+-- ═══ 5. Grant execute on create_resonance_event ═══
+-- supabase-security-fixes.sql DROPped and recreated this function without
+-- an explicit GRANT. Re-granting ensures authenticated users can call it
+-- (needed for still_here, nudge, turn_nudge, and moment persistence).
+GRANT EXECUTE ON FUNCTION create_resonance_event(uuid, text, text, uuid[], jsonb) TO authenticated;
