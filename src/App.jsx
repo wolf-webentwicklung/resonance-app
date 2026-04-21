@@ -1845,7 +1845,8 @@ function ResonanceSpace({ user, pair, onDissolve }) {
       console.error("Send error:", err);
       setCanSend(true);
       setSentTone(null);
-      setAppError("Failed to send trace. Try again.");
+      var detail = err?.message || err?.code || (typeof err === 'string' ? err : null);
+      setAppError(detail ? "Send failed: " + detail : "Failed to send trace. Try again.");
     }
   }, [pair, user, partnerId]);
 
