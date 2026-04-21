@@ -59,14 +59,19 @@ self.addEventListener('push', function(event) {
   var body = data.body || 'something is here';
   var tag = data.tag || 'resona';
   event.waitUntil(
-    self.registration.showNotification(title, {
-      body: body,
-      icon: '/icon-192.png',
-      badge: '/icon-192.png',
-      tag: tag,
-      renotify: true,
-      vibrate: [100, 50, 100],
-      data: { url: self.location.origin },
+    clients.matchAll({ type: 'window', includeUncontrolled: true }).then(function(clientList) {
+      // App is open and visible — realtime subscription handles the update in-app
+      var appVisible = clientList.some(function(c) { return c.visibilityState === 'visible'; });
+      if (appVisible) return Promise.resolve();
+      return self.registration.showNotification(title, {
+        body: body,
+        icon: '/icon-192.png',
+        badge: '/icon-192.png',
+        tag: tag,
+        renotify: true,
+        vibrate: [100, 50, 100],
+        data: { url: self.location.origin },
+      });
     })
   );
 });

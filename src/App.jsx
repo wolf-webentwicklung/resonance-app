@@ -2077,7 +2077,7 @@ function ResonanceSpace({ user, pair, onDissolve }) {
         onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerLeave={onUp} />
 
       {/* Error toast */}
-      {appError ? <div style={{ position:"absolute",top:50,left:"50%",transform:"translateX(-50%)",zIndex:60,padding:"10px 20px",borderRadius:12,background:"rgba(196,30,58,0.12)",border:"1px solid rgba(196,30,58,0.2)",fontFamily:FONT,animation:"fadeIn 0.5s ease" }}>
+      {appError ? <div style={{ position:"absolute",top:"calc(env(safe-area-inset-top, 44px) + 8px)",left:"50%",transform:"translateX(-50%)",zIndex:60,padding:"10px 20px",borderRadius:12,background:"rgba(196,30,58,0.12)",border:"1px solid rgba(196,30,58,0.2)",fontFamily:FONT,animation:"fadeIn 0.5s ease" }}>
         <span style={{ color:"rgba(196,30,58,0.7)",fontSize:12,letterSpacing:"0.05em",fontWeight:300 }}>{appError}</span>
       </div> : null}
 
